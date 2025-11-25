@@ -47,9 +47,18 @@ def download_games(seasons: List[int]) -> pd.DataFrame:
     """
     schedules = nfl.import_schedules(seasons)
 
-    # Filter to regular season only
+    # nfl_data_py versions differ on the name of the season-type column.
+    # Prefer "season_type" if present, otherwise fall back to "game_type".
     if "season_type" in schedules.columns:
-        schedules = schedules[schedules["season_type"] == "REG"]
+        season_type_col = "season_type"
+    elif "game_type" in schedules.columns:
+        season_type_col = "game_type"
+    else:
+        season_type_col = None
+
+    # Filter to regular season only when possible
+    if season_type_col is not None:
+        schedules = schedules[schedules[season_type_col] == "REG"]
 
     required_cols = [
         "game_id",
@@ -59,11 +68,17 @@ def download_games(seasons: List[int]) -> pd.DataFrame:
         "away_team",
         "home_score",
         "away_score",
-        "season_type",
     ]
     _validate_columns(schedules, required_cols, context="schedules")
 
     games = schedules[required_cols].copy()
+
+    # Add/normalize season_type for downstream code
+    if season_type_col is not None:
+        games[config.COL_SEASON_TYPE] = schedules[season_type_col].values
+    else:
+        # If no explicit season-type column is present, assume regular season
+        games[config.COL_SEASON_TYPE] = "REG"
 
     # Align column names exactly with config expectations (already matching
     # in most nfl_data_py versions, but kept explicit for clarity).
@@ -75,7 +90,6 @@ def download_games(seasons: List[int]) -> pd.DataFrame:
         "away_team": config.COL_AWAY_TEAM,
         "home_score": config.COL_HOME_SCORE,
         "away_score": config.COL_AWAY_SCORE,
-        "season_type": config.COL_SEASON_TYPE,
     }
     games = games.rename(columns=rename_map)
 
@@ -92,22 +106,31 @@ def download_player_game_stats(seasons: List[int]) -> pd.DataFrame:
     """
     weekly = nfl.import_weekly_data(seasons, downcast=True)
 
-    # Join with schedules to attach season_type and filter to regular season
+    # Join with schedules to attach season_type / game_type and filter to REG
     schedules = nfl.import_schedules(seasons)
     if "season_type" in schedules.columns:
-        schedules = schedules[schedules["season_type"] == "REG"]
+        season_type_col = "season_type"
+    elif "game_type" in schedules.columns:
+        season_type_col = "game_type"
+    else:
+        season_type_col = None
+
+    if season_type_col is not None:
+        schedules = schedules[schedules[season_type_col] == "REG"]
 
     # Only keep join columns we need
     sched_cols = [
         "game_id",
         "season",
         "week",
-        "season_type",
         "home_team",
         "away_team",
         "home_score",
         "away_score",
     ]
+    if season_type_col is not None:
+        sched_cols.append(season_type_col)
+
     schedules = schedules[sched_cols].copy()
 
     weekly = weekly.merge(schedules, on=["game_id", "season", "week"], how="inner")
@@ -136,7 +159,10 @@ def download_player_game_stats(seasons: List[int]) -> pd.DataFrame:
     weekly[config.COL_POSITION] = weekly["position"]
 
     # Attach season_type and game-level info
-    weekly[config.COL_SEASON_TYPE] = weekly["season_type"]
+    if season_type_col is not None:
+        weekly[config.COL_SEASON_TYPE] = weekly[season_type_col]
+    else:
+        weekly[config.COL_SEASON_TYPE] = "REG"
     weekly[config.COL_HOME_TEAM] = weekly["home_team"]
     weekly[config.COL_AWAY_TEAM] = weekly["away_team"]
     weekly[config.COL_HOME_SCORE] = weekly["home_score"]
