@@ -25,6 +25,10 @@ def compute_dk_points_offense(df: pd.DataFrame) -> pd.DataFrame:
     A new column `dk_points` is added and the same dataframe is returned.
     Missing stat columns are treated as zeros.
     """
+    # Ensure we have a simple, monotonic index so that arithmetic between
+    # Series does not trigger pandas' mixed-type index alignment edge cases
+    # (e.g., when upstream Parquet data brings along a string/integer index mix).
+    df = df.reset_index(drop=True)
     # Ensure all stat columns exist so arithmetic is straightforward
     for col in [
         config.COL_PASS_YARDS,

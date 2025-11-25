@@ -93,11 +93,11 @@ def build_pairwise_dataset(
 
     Only offensive players (as defined in config.OFFENSIVE_POSITIONS) are used.
     """
-    # Merge in game-level metadata
+    # Merge in game-level metadata. Season/week are already present in
+    # player_games_df, so we only bring in team and score info here to avoid
+    # creating suffixed columns like season_x/season_y.
     games_cols = [
         config.COL_GAME_ID,
-        config.COL_SEASON,
-        config.COL_WEEK,
         config.COL_HOME_TEAM,
         config.COL_AWAY_TEAM,
         config.COL_HOME_SCORE,

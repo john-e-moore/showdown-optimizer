@@ -22,6 +22,11 @@ def _rename_stats_to_canonical(df: pd.DataFrame) -> pd.DataFrame:
     Rename raw nflverse stat columns to canonical names defined in config.
 
     Only columns present in the dataframe are renamed.
+
+    If multiple raw columns map to the same canonical name (e.g. both
+    \"receptions\" and \"targets\" mapping to the canonical receptions stat),
+    they are collapsed into a single column by taking the first non-null
+    value across the duplicates on each row.
     """
     to_rename = {
         raw: canonical
@@ -30,6 +35,23 @@ def _rename_stats_to_canonical(df: pd.DataFrame) -> pd.DataFrame:
     }
     if to_rename:
         df = df.rename(columns=to_rename)
+
+        # After renaming, collapse any duplicated canonical stat columns so that
+        # downstream code sees a single Series per stat instead of a DataFrame.
+        for canonical in set(to_rename.values()):
+            # Find all columns that now share this canonical name
+            dup_mask = df.columns == canonical
+            if dup_mask.sum() <= 1:
+                continue
+
+            dup_cols = list(df.columns[dup_mask])
+            # Combine duplicates by taking the first non-null value across them
+            combined = df.loc[:, dup_cols].bfill(axis=1).iloc[:, 0]
+
+            # Drop all duplicate columns and replace with the combined Series
+            df = df.drop(columns=dup_cols)
+            df[canonical] = combined
+
     return df
 
 
