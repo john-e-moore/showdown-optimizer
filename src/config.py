@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+"""
+Global configuration for the NFL Showdown correlation pipeline.
+
+All filesystem paths are relative to the project root by default but can be
+overridden as needed by editing this module.
+"""
+
+from pathlib import Path
+from typing import Final, Dict, List
+
+
+# -----------------------------------------------------------------------------
+# Base paths
+# -----------------------------------------------------------------------------
+
+PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
+DATA_DIR: Final[Path] = PROJECT_ROOT / "data"
+NFL_RAW_DIR: Final[Path] = DATA_DIR / "nfl_raw"
+NFL_PROCESSED_DIR: Final[Path] = DATA_DIR / "nfl_processed"
+SABERSIM_DIR: Final[Path] = DATA_DIR / "sabersim"
+MODELS_DIR: Final[Path] = PROJECT_ROOT / "models"
+OUTPUTS_DIR: Final[Path] = PROJECT_ROOT / "outputs"
+CORR_OUTPUTS_DIR: Final[Path] = OUTPUTS_DIR / "correlations"
+
+
+# -----------------------------------------------------------------------------
+# Data file locations
+# -----------------------------------------------------------------------------
+
+NFL_PLAYER_GAMES_PARQUET: Final[str] = str(NFL_RAW_DIR / "player_stats.parquet")
+NFL_GAMES_PARQUET: Final[str] = str(NFL_RAW_DIR / "games.parquet")
+
+SABERSIM_CSV: Final[str] = str(
+    SABERSIM_DIR / "NFL_2025-11-24-815pm_DK_SHOWDOWN_CAR-@-SF.csv"
+)
+
+OUTPUT_CORR_EXCEL: Final[str] = str(
+    CORR_OUTPUTS_DIR / "showdown_corr_matrix.xlsx"
+)
+
+
+# -----------------------------------------------------------------------------
+# Modeling / filtering constants
+# -----------------------------------------------------------------------------
+
+MIN_PLAYER_GAMES: Final[int] = 8
+
+# Seasons for model splits (inclusive ranges)
+TRAIN_SEASONS: Final[range] = range(2005, 2018)  # 2005–2017
+VAL_SEASONS: Final[range] = range(2018, 2021)    # 2018–2020
+TEST_SEASONS: Final[range] = range(2021, 2100)   # 2021+
+
+# Offensive positions to include downstream (plus optional K)
+OFFENSIVE_POSITIONS: Final[List[str]] = ["QB", "RB", "WR", "TE", "K"]
+
+
+# -----------------------------------------------------------------------------
+# Column name mappings
+# -----------------------------------------------------------------------------
+
+# Canonical internal names used throughout the pipeline
+COL_GAME_ID: Final[str] = "game_id"
+COL_PLAYER_ID: Final[str] = "player_id"
+COL_SEASON: Final[str] = "season"
+COL_WEEK: Final[str] = "week"
+COL_TEAM: Final[str] = "team"
+COL_OPPONENT: Final[str] = "opponent"
+COL_POSITION: Final[str] = "position"
+COL_HOME_TEAM: Final[str] = "home_team"
+COL_AWAY_TEAM: Final[str] = "away_team"
+COL_HOME_SCORE: Final[str] = "home_score"
+COL_AWAY_SCORE: Final[str] = "away_score"
+COL_SEASON_TYPE: Final[str] = "season_type"
+
+# Offensive box score stats (canonical)
+COL_PASS_YARDS: Final[str] = "pass_yards"
+COL_PASS_TDS: Final[str] = "pass_tds"
+COL_INTERCEPTIONS: Final[str] = "interceptions"
+COL_RUSH_YARDS: Final[str] = "rush_yards"
+COL_RUSH_TDS: Final[str] = "rush_tds"
+COL_REC_YARDS: Final[str] = "rec_yards"
+COL_REC_TDS: Final[str] = "rec_tds"
+COL_RECEPTIONS: Final[str] = "receptions"
+
+# Canonical fantasy points columns
+COL_DK_POINTS: Final[str] = "dk_points"
+COL_MU_PLAYER: Final[str] = "mu_player"
+COL_SIGMA_PLAYER: Final[str] = "sigma_player"
+COL_Z_SCORE: Final[str] = "z"
+
+
+# Mappings from expected nflverse-style raw column names to canonical names.
+# Adjust these as needed to match the user's local Parquet schema.
+RAW_TO_CANONICAL_STATS: Final[Dict[str, str]] = {
+    # Passing
+    "passing_yards": COL_PASS_YARDS,
+    "pass_yards": COL_PASS_YARDS,
+    "passing_tds": COL_PASS_TDS,
+    "pass_tds": COL_PASS_TDS,
+    "interceptions": COL_INTERCEPTIONS,
+    "int": COL_INTERCEPTIONS,
+    # Rushing
+    "rushing_yards": COL_RUSH_YARDS,
+    "rush_yards": COL_RUSH_YARDS,
+    "rushing_tds": COL_RUSH_TDS,
+    "rush_tds": COL_RUSH_TDS,
+    # Receiving
+    "receiving_yards": COL_REC_YARDS,
+    "rec_yards": COL_REC_YARDS,
+    "receiving_tds": COL_REC_TDS,
+    "rec_tds": COL_REC_TDS,
+    "receptions": COL_RECEPTIONS,
+    "targets": COL_RECEPTIONS,  # fallback if receptions not provided
+}
+
+
+def ensure_directories() -> None:
+    """
+    Ensure that key directories used by the pipeline exist.
+
+    This does not create raw-data directories (user is expected to place
+    Parquet files there) but will create processed, models, and outputs dirs.
+    """
+
+    NFL_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    CORR_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
