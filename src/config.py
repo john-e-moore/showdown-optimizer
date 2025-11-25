@@ -45,6 +45,8 @@ OUTPUT_CORR_EXCEL: Final[str] = str(
     CORR_OUTPUTS_DIR / "showdown_corr_matrix.xlsx"
 )
 
+CORR_MODEL_PATH: Final[str] = str(MODELS_DIR / "corr_model.pkl")
+
 
 # -----------------------------------------------------------------------------
 # Modeling / filtering constants
