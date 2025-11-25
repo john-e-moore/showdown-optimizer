@@ -32,6 +32,11 @@ CORR_OUTPUTS_DIR: Final[Path] = OUTPUTS_DIR / "correlations"
 NFL_PLAYER_GAMES_PARQUET: Final[str] = str(NFL_RAW_DIR / "player_stats.parquet")
 NFL_GAMES_PARQUET: Final[str] = str(NFL_RAW_DIR / "games.parquet")
 
+# Processed datasets
+PROCESSED_PLAYER_GAMES_PARQUET: Final[str] = str(
+    NFL_PROCESSED_DIR / "player_games_with_z.parquet"
+)
+
 SABERSIM_CSV: Final[str] = str(
     SABERSIM_DIR / "NFL_2025-11-24-815pm_DK_SHOWDOWN_CAR-@-SF.csv"
 )
