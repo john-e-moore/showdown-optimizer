@@ -106,7 +106,15 @@ def download_player_game_stats(seasons: List[int]) -> pd.DataFrame:
     """
     weekly = nfl.import_weekly_data(seasons, downcast=True)
 
-    # Join with schedules to attach season_type / game_type and filter to REG
+    # Determine team column name used by nfl_data_py (recent_team vs team)
+    team_col = "recent_team" if "recent_team" in weekly.columns else "team"
+    if team_col not in weekly.columns:
+        raise KeyError(
+            "Weekly data missing team column 'recent_team' or 'team'. "
+            "Check nfl_data_py version or update download_player_game_stats."
+        )
+
+    # Import schedules to get game_ids and filter to regular season
     schedules = nfl.import_schedules(seasons)
     if "season_type" in schedules.columns:
         season_type_col = "season_type"
@@ -118,25 +126,25 @@ def download_player_game_stats(seasons: List[int]) -> pd.DataFrame:
     if season_type_col is not None:
         schedules = schedules[schedules[season_type_col] == "REG"]
 
-    # Only keep join columns we need
-    sched_cols = [
-        "game_id",
-        "season",
-        "week",
-        "home_team",
-        "away_team",
-        "home_score",
-        "away_score",
-    ]
-    if season_type_col is not None:
-        sched_cols.append(season_type_col)
+    sched_required = ["game_id", "season", "week", "home_team", "away_team"]
+    _validate_columns(schedules, sched_required, context="schedules for weekly data")
 
-    schedules = schedules[sched_cols].copy()
+    # Expand schedules to team-level rows (one per team per game)
+    home_map = schedules[["game_id", "season", "week", "home_team"]].rename(
+        columns={"home_team": "team"}
+    )
+    away_map = schedules[["game_id", "season", "week", "away_team"]].rename(
+        columns={"away_team": "team"}
+    )
+    team_games = pd.concat([home_map, away_map], ignore_index=True)
 
-    weekly = weekly.merge(schedules, on=["game_id", "season", "week"], how="inner")
-
-    # Determine team column name used by nfl_data_py (recent_team vs team)
-    team_col = "recent_team" if "recent_team" in weekly.columns else "team"
+    # Attach game_id to weekly data via season/week/team
+    weekly = weekly.merge(
+        team_games,
+        left_on=["season", "week", team_col],
+        right_on=["season", "week", "team"],
+        how="inner",
+    )
 
     required_weekly_cols = [
         "game_id",
@@ -149,52 +157,21 @@ def download_player_game_stats(seasons: List[int]) -> pd.DataFrame:
     ]
     _validate_columns(weekly, required_weekly_cols, context="weekly player data")
 
-    # Core identifiers
-    weekly[config.COL_GAME_ID] = weekly["game_id"]
-    weekly[config.COL_PLAYER_ID] = weekly["player_id"]
-    weekly[config.COL_SEASON] = weekly["season"]
-    weekly[config.COL_WEEK] = weekly["week"]
-    weekly[config.COL_TEAM] = weekly[team_col]
-    weekly[config.COL_OPPONENT] = weekly["opponent_team"]
-    weekly[config.COL_POSITION] = weekly["position"]
-
-    # Attach season_type and game-level info
-    if season_type_col is not None:
-        weekly[config.COL_SEASON_TYPE] = weekly[season_type_col]
-    else:
-        weekly[config.COL_SEASON_TYPE] = "REG"
-    weekly[config.COL_HOME_TEAM] = weekly["home_team"]
-    weekly[config.COL_AWAY_TEAM] = weekly["away_team"]
-    weekly[config.COL_HOME_SCORE] = weekly["home_score"]
-    weekly[config.COL_AWAY_SCORE] = weekly["away_score"]
-
-    # Keep key identifier and stat columns (leave stat names as provided by
-    # nfl_data_py; they will be mapped to canonical names later via
-    # config.RAW_TO_CANONICAL_STATS in data_loading._rename_stats_to_canonical).
-    base_cols = [
-        config.COL_GAME_ID,
-        config.COL_PLAYER_ID,
-        config.COL_SEASON,
-        config.COL_WEEK,
-        config.COL_TEAM,
-        config.COL_OPPONENT,
-        config.COL_POSITION,
-        config.COL_SEASON_TYPE,
-        config.COL_HOME_TEAM,
-        config.COL_AWAY_TEAM,
-        config.COL_HOME_SCORE,
-        config.COL_AWAY_SCORE,
-    ]
+    # Build canonical player-game dataframe
+    player_games = pd.DataFrame()
+    player_games[config.COL_GAME_ID] = weekly["game_id"]
+    player_games[config.COL_PLAYER_ID] = weekly["player_id"]
+    player_games[config.COL_SEASON] = weekly["season"]
+    player_games[config.COL_WEEK] = weekly["week"]
+    player_games[config.COL_TEAM] = weekly[team_col]
+    player_games[config.COL_OPPONENT] = weekly["opponent_team"]
+    player_games[config.COL_POSITION] = weekly["position"]
+    player_games[config.COL_SEASON_TYPE] = "REG"
 
     # Include all potential raw stat columns that data_loading knows how to map
-    stat_cols = [
-        col
-        for col in config.RAW_TO_CANONICAL_STATS.keys()
-        if col in weekly.columns
-    ]
-
-    cols_to_keep = base_cols + stat_cols
-    player_games = weekly[cols_to_keep].copy()
+    for raw_col in config.RAW_TO_CANONICAL_STATS.keys():
+        if raw_col in weekly.columns:
+            player_games[raw_col] = weekly[raw_col]
 
     return player_games
 
