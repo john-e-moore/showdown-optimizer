@@ -61,7 +61,9 @@ def _prepare_simulation_players(
             f"Sabersim dataframe missing DK projection column '{SABERSIM_DK_PROJ_COL}'."
         )
 
-    df = sabersim_df.copy()
+    # Work with a clean, 0-based index so that team-specific indices can be
+    # used directly to index into per-simulation arrays of length n_players.
+    df = sabersim_df.reset_index(drop=True).copy()
     df["player_name"] = df[SABERSIM_NAME_COL].astype(str)
     df["team"] = df[SABERSIM_TEAM_COL].astype(str)
     df["position"] = df[SABERSIM_POS_COL].astype(str)
