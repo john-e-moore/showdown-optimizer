@@ -128,9 +128,9 @@
 
 ### To-dos
 
-- [ ] Define `Player`, `PlayerPool`, and `Lineup` classes in `src/lineup_optimizer.py` and implement a Sabersim-to-PlayerPool CSV loader.
-- [ ] Implement PuLP-based single-lineup MILP model in `src/lineup_optimizer.py` with decision variables, base constraints, and objective.
-- [ ] Add reusable constraint builder helpers and integrate them into the optimization flow.
-- [ ] Implement iterative top-N lineup generation with no-duplicate constraints and a public `optimize_showdown_lineups` API.
-- [ ] Create `src/showdown_optimizer_main.py` CLI to run the optimizer and print/export lineups.
-- [ ] Update `requirements.txt` with `pulp` and add README documentation for running the optimizer.
+- [x] Define `Player`, `PlayerPool`, and `Lineup` classes in `src/lineup_optimizer.py` and implement a Sabersim-to-PlayerPool CSV loader.
+- [x] Implement PuLP-based single-lineup MILP model in `src/lineup_optimizer.py` with decision variables, base constraints, and objective.
+- [x] Add reusable constraint builder helpers and integrate them into the optimization flow.
+- [x] Implement iterative top-N lineup generation with no-duplicate constraints and a public `optimize_showdown_lineups` API.
+- [x] Create `src/showdown_optimizer_main.py` CLI to run the optimizer and print/export lineups.
+- [x] Update `requirements.txt` with `pulp` and add README documentation for running the optimizer.

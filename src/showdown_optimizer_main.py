@@ -167,14 +167,19 @@ def main() -> None:
         )
 
     def _to_pct(value: float) -> float:
-        # Heuristic: treat values <= 1.0 as fractions and convert to percent.
-        return float(value * 100.0) if value <= 1.0 else float(value)
+        """
+        Interpret Sabersim 'My Own' as already expressed in percentage units.
+
+        Values like 0.67 are treated as 0.67% (not 67%), so we do not rescale.
+        """
+        return float(value)
 
     # For each (Name, Team) pair, identify CPT vs FLEX rows by projection:
     #   - Larger 'My Proj' => CPT row
     #   - Other row => FLEX row
     ownership_rows = []
-    player_own_pct_by_id: dict[str, float] = {}
+    player_cpt_own_pct_by_id: dict[str, float] = {}
+    player_flex_own_pct_by_id: dict[str, float] = {}
 
     grouped = sabersim_df.groupby(["Name", "Team"])
     own_by_name_team: dict[tuple[str, str], tuple[float, float]] = {}
@@ -199,7 +204,9 @@ def main() -> None:
         key = (p.name, p.team)
         cpt_pct, flex_pct = own_by_name_team.get(key, (0.0, 0.0))
         total_pct = cpt_pct + flex_pct
-        player_own_pct_by_id[p.player_id] = total_pct
+
+        player_cpt_own_pct_by_id[p.player_id] = cpt_pct
+        player_flex_own_pct_by_id[p.player_id] = flex_pct
 
         ownership_rows.append(
             {
@@ -228,10 +235,13 @@ def main() -> None:
         counts_sorted = sorted(team_counts.values(), reverse=True)
         stack_str = "|".join(str(c) for c in counts_sorted)
 
-        def fmt_player_with_own(player_id: str) -> str:
+        def fmt_player_with_own(player_id: str, *, slot: str) -> str:
             player = players_by_id[player_id]
-            total_pct = player_own_pct_by_id.get(player_id, 0.0)
-            pct_int = int(round(total_pct))
+            if slot == "CPT":
+                raw_pct = player_cpt_own_pct_by_id.get(player_id, 0.0)
+            else:
+                raw_pct = player_flex_own_pct_by_id.get(player_id, 0.0)
+            pct_int = int(round(raw_pct))
             return f"{player.name} ({pct_int}%)"
 
         row = {
@@ -239,11 +249,11 @@ def main() -> None:
             "lineup_projection": lineup.projection(),
             "lineup_salary": lineup.salary(),
             "stack": stack_str,
-            "cpt": fmt_player_with_own(lineup.cpt.player_id),
+            "cpt": fmt_player_with_own(lineup.cpt.player_id, slot="CPT"),
         }
         for j, p in enumerate(lineup.flex, start=1):
             col_name = f"flex{j}"
-            row[col_name] = fmt_player_with_own(p.player_id)
+            row[col_name] = fmt_player_with_own(p.player_id, slot="FLEX")
 
         lineup_rows.append(row)
 
