@@ -333,6 +333,26 @@ def add_eligibility_constraints(
                 )
 
 
+def add_min_one_per_team_constraint(
+    prob: pulp.LpProblem,
+    x: VarDict,
+    player_pool: PlayerPool,
+) -> None:
+    """
+    Ensure each team represented in the player pool has at least one player
+    in the lineup (either CPT or FLEX).
+    """
+    teams = sorted({p.team for p in player_pool.players})
+    for team in teams:
+        team_players = [p for p in player_pool.players if p.team == team]
+        if not team_players:
+            continue
+        team_count = pulp.lpSum(
+            x[(p.player_id, slot)] for p in team_players for slot in SLOTS
+        )
+        prob += team_count >= 1, f"min_one_from_team_{team}"
+
+
 def set_mean_projection_objective(
     prob: pulp.LpProblem,
     x: VarDict,
@@ -361,6 +381,7 @@ def add_base_constraints(
     add_unique_player_constraint(prob, x, player_pool)
     add_salary_cap_constraint(prob, x, player_pool, salary_cap)
     add_eligibility_constraints(prob, x, player_pool)
+    add_min_one_per_team_constraint(prob, x, player_pool)
 
 
 # ---------------------------------------------------------------------------
