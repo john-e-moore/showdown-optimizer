@@ -1,87 +1,30 @@
 from __future__ import annotations
 
 """
-Entry point for the NFL Showdown correlation pipeline.
+Entry point for the NFL Showdown simulation-based correlation pipeline.
 
-On first run (or with --retrain), this script:
-  1. Loads historical nflverse-style Parquet data.
-  2. Computes DK offensive fantasy points and per-player z-scores.
-  3. Builds a pairwise training dataset.
-  4. Trains a correlation regression model and saves it to disk.
-
-On every run, it:
-  1. Loads the trained model.
-  2. Loads Sabersim projections for a single Showdown slate.
-  3. Builds a player correlation matrix for that slate.
+This script:
+  1. Loads Sabersim projections for a single Showdown slate.
+  2. Runs a Monte Carlo simulator to generate joint DK fantasy outcomes.
+  3. Builds a player correlation matrix from the simulated DK points.
   4. Writes an Excel file with projections and the correlation matrix.
 """
 
 import argparse
 from pathlib import Path
 
-import joblib
 import pandas as pd
 
 from . import (
     build_corr_matrix_from_projections,
-    build_pairwise_dataset,
     config,
-    data_loading,
-    fantasy_scoring,
-    feature_engineering,
     simulation_corr,
-    train_corr_model,
 )
-
-
-def _train_historical_model() -> None:
-    """
-    Run the full historical pipeline and train the correlation model.
-    """
-    print("Loading historical player-game stats and games...")
-    player_games = data_loading.load_player_game_stats(
-        config.NFL_PLAYER_GAMES_PARQUET
-    )
-    games = data_loading.load_games(config.NFL_GAMES_PARQUET)
-
-    print("Computing DK offensive fantasy points...")
-    player_games = fantasy_scoring.compute_dk_points_offense(player_games)
-
-    print("Computing per-player DK stats and z-scores...")
-    player_games_z = feature_engineering.add_player_dk_stats(
-        player_games, config.MIN_PLAYER_GAMES
-    )
-
-    print("Building pairwise training dataset...")
-    pairwise_df = build_pairwise_dataset.build_pairwise_dataset(
-        player_games_z, games
-    )
-
-    print("Training correlation regression model...")
-    train_corr_model.train_corr_regressor(pairwise_df)
-    print(f"Model saved to {config.CORR_MODEL_PATH}")
-
-
-def _load_model() -> object:
-    """
-    Load the trained correlation model pipeline from disk.
-    """
-    if not Path(config.CORR_MODEL_PATH).exists():
-        raise FileNotFoundError(
-            f"Correlation model not found at {config.CORR_MODEL_PATH}. "
-            "Run with --retrain to train it from historical data."
-        )
-    return joblib.load(config.CORR_MODEL_PATH)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="NFL Showdown player correlation pipeline"
-    )
-    parser.add_argument(
-        "--retrain",
-        action="store_true",
-        help="Retrain the correlation model from historical data.",
     )
     parser.add_argument(
         "--sabersim-csv",
@@ -96,55 +39,28 @@ def main() -> None:
         help="Path to output Excel file containing projections and correlation matrix.",
     )
     parser.add_argument(
-        "--corr-method",
-        type=str,
-        choices=["simulation", "ml"],
-        default=config.DEFAULT_CORR_METHOD,
-        help=(
-            "Method for building the player correlation matrix from Sabersim "
-            "projections: 'simulation' (Monte Carlo, default) or 'ml' "
-            "(historical regression model)."
-        ),
-    )
-    parser.add_argument(
         "--n-sims",
         type=int,
         default=config.SIM_N_GAMES,
-        help="Number of Monte Carlo simulations to run when corr-method=simulation.",
+        help="Number of Monte Carlo simulations to run.",
     )
 
     args = parser.parse_args()
 
     config.ensure_directories()
 
-    # Only train or require the ML model when it will be used.
-    use_ml = args.corr_method == "ml"
-    if use_ml and (args.retrain or not Path(config.CORR_MODEL_PATH).exists()):
-        _train_historical_model()
-
     print(f"Loading Sabersim projections from {args.sabersim_csv}...")
     sabersim_df = build_corr_matrix_from_projections.load_sabersim_projections(
         args.sabersim_csv
     )
 
-    if use_ml:
-        print("Loading trained correlation model...")
-        model = _load_model()
-
-        print("Building player correlation matrix with ML model...")
-        corr_matrix = (
-            build_corr_matrix_from_projections.build_corr_matrix_from_sabersim(
-                model, sabersim_df
-            )
-        )
-    else:
-        print(
-            f"Building player correlation matrix via simulation "
-            f"({args.n_sims} simulated games)..."
-        )
-        corr_matrix = simulation_corr.simulate_corr_matrix_from_projections(
-            sabersim_df, n_sims=args.n_sims
-        )
+    print(
+        f"Building player correlation matrix via simulation "
+        f"({args.n_sims} simulated games)..."
+    )
+    corr_matrix = simulation_corr.simulate_corr_matrix_from_projections(
+        sabersim_df, n_sims=args.n_sims
+    )
 
     print(f"Writing Excel output to {args.output_excel}...")
     output_path = Path(args.output_excel)
