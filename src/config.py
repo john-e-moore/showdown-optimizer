@@ -23,6 +23,7 @@ SABERSIM_DIR: Final[Path] = DATA_DIR / "sabersim"
 MODELS_DIR: Final[Path] = PROJECT_ROOT / "models"
 OUTPUTS_DIR: Final[Path] = PROJECT_ROOT / "outputs"
 CORR_OUTPUTS_DIR: Final[Path] = OUTPUTS_DIR / "correlations"
+DIAGNOSTICS_DIR: Final[Path] = PROJECT_ROOT / "diagnostics"
 
 
 # -----------------------------------------------------------------------------
@@ -54,10 +55,16 @@ CORR_MODEL_PATH: Final[str] = str(MODELS_DIR / "corr_model.pkl")
 
 MIN_PLAYER_GAMES: Final[int] = 8
 
-# Seasons for model splits (inclusive ranges)
-TRAIN_SEASONS: Final[range] = range(2005, 2018)  # 2005–2017
-VAL_SEASONS: Final[range] = range(2018, 2021)    # 2018–2020
-TEST_SEASONS: Final[range] = range(2021, 2100)   # 2021+
+# Enable or disable writing diagnostics snapshots.
+ENABLE_DIAGNOSTICS: Final[bool] = True
+
+# Seasons for model splits (inclusive ranges).
+# Your current dataset (per diagnostics) only contains 2023–2024, so we
+# allocate 2023 for training and 2024 for validation/test. Adjust as you
+# add more historical seasons.
+TRAIN_SEASONS: Final[range] = range(2023, 2024)  # 2023
+VAL_SEASONS: Final[range] = range(2024, 2025)    # 2024
+TEST_SEASONS: Final[range] = range(2024, 2025)   # 2024 (reuse for test)
 
 # Offensive positions to include downstream (plus optional K)
 OFFENSIVE_POSITIONS: Final[List[str]] = ["QB", "RB", "WR", "TE", "K"]
@@ -128,11 +135,13 @@ def ensure_directories() -> None:
     Ensure that key directories used by the pipeline exist.
 
     This does not create raw-data directories (user is expected to place
-    Parquet files there) but will create processed, models, and outputs dirs.
+    Parquet files there) but will create processed, models, outputs, and
+    diagnostics dirs.
     """
 
     NFL_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     CORR_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
 

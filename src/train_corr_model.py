@@ -15,7 +15,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
-from . import config
+from . import config, diagnostics
 
 
 # Feature definitions shared between training and inference
@@ -73,11 +73,17 @@ def _build_pipeline() -> Pipeline:
     """
     Build a scikit-learn Pipeline with preprocessing and a tree-based regressor.
     """
+    # Use a dense output for compatibility with HistGradientBoostingRegressor.
+    try:
+        ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:  # fallback for older scikit-learn versions
+        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
     preprocessor = ColumnTransformer(
         transformers=[
             (
                 "cat",
-                OneHotEncoder(handle_unknown="ignore"),
+                ohe,
                 CATEGORICAL_FEATURES,
             ),
             ("num", "passthrough", NUMERICAL_FEATURES),
@@ -122,14 +128,42 @@ def train_corr_regressor(pairwise_df: pd.DataFrame) -> Pipeline:
     """
     # Ensure all required feature columns exist; if some rolling features are
     # missing, they will be silently ignored later when selecting columns.
-    available_num_features = [f for f in NUMERICAL_FEATURES if f in pairwise_df.columns]
+    available_num_features = [
+        f for f in NUMERICAL_FEATURES if f in pairwise_df.columns
+    ]
     X_cols = CATEGORICAL_FEATURES + available_num_features
 
     df = pairwise_df.copy()
     if "y" not in df.columns:
         raise KeyError("Pairwise dataframe must contain target column 'y'.")
 
+    # Diagnostics for full pairwise dataset
+    diagnostics.write_df_snapshot(df, name="pairwise_full", step="train_input")
+
     train_df, val_df, test_df = _time_based_split(df)
+
+    # Basic split diagnostics
+    print(
+        f"Train/Val/Test sizes: "
+        f"{len(train_df)} / {len(val_df)} / {len(test_df)} rows"
+    )
+
+    # Guard against empty training data and provide helpful guidance.
+    if len(train_df) == 0:
+        seasons = df[config.COL_SEASON].dropna()
+        if seasons.empty:
+            raise ValueError(
+                "No season information available in pairwise dataframe; cannot "
+                "perform time-based split for training."
+            )
+        min_season = int(seasons.min())
+        max_season = int(seasons.max())
+        raise ValueError(
+            "Training split is empty: no rows with seasons in TRAIN_SEASONS. "
+            f"Available seasons range from {min_season} to {max_season}. "
+            "Update TRAIN_SEASONS/VAL_SEASONS/TEST_SEASONS in config.py or "
+            "adjust the splitting logic to match your data."
+        )
 
     X_train = train_df[X_cols]
     y_train = train_df["y"]
@@ -139,6 +173,11 @@ def train_corr_regressor(pairwise_df: pd.DataFrame) -> Pipeline:
 
     X_test = test_df[X_cols]
     y_test = test_df["y"]
+
+    # Diagnostics for split datasets
+    diagnostics.write_df_snapshot(train_df, name="train", step="train_split")
+    diagnostics.write_df_snapshot(val_df, name="val", step="train_split")
+    diagnostics.write_df_snapshot(test_df, name="test", step="train_split")
 
     pipeline = _build_pipeline()
     pipeline.fit(X_train, y_train)

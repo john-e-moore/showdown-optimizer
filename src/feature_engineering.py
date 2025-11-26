@@ -12,7 +12,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from . import config
+from . import config, diagnostics
 
 
 def _filter_offensive_players(df: pd.DataFrame) -> pd.DataFrame:
@@ -95,6 +95,11 @@ def add_player_dk_stats(df: pd.DataFrame, min_games: int) -> pd.DataFrame:
     # Persist processed dataframe for reuse
     config.NFL_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(config.PROCESSED_PLAYER_GAMES_PARQUET, index=False)
+
+    # Diagnostics snapshot
+    diagnostics.write_df_snapshot(
+        df, name="player_games_with_z", step="feature_engineering"
+    )
 
     return df
 

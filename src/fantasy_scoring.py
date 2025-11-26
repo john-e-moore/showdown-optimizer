@@ -9,7 +9,7 @@ computes DraftKings-like fantasy points for offensive positions.
 
 import pandas as pd
 
-from . import config
+from . import config, diagnostics
 
 
 def compute_dk_points_offense(df: pd.DataFrame) -> pd.DataFrame:
@@ -78,6 +78,12 @@ def compute_dk_points_offense(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df[config.COL_DK_POINTS] = dk_pass + dk_rush + dk_rec
+
+    # Diagnostics snapshot
+    diagnostics.write_df_snapshot(
+        df, name="player_games_with_dk", step="fantasy_scoring"
+    )
+
     return df
 
 

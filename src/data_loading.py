@@ -14,7 +14,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from . import config
+from . import config, diagnostics
 
 
 def _rename_stats_to_canonical(df: pd.DataFrame) -> pd.DataFrame:
@@ -124,6 +124,9 @@ def load_player_game_stats(path: str) -> pd.DataFrame:
     ]
     _ensure_columns(df, required_cols)
 
+    # Diagnostics snapshot
+    diagnostics.write_df_snapshot(df, name="player_games", step="load")
+
     return df
 
 
@@ -156,6 +159,9 @@ def load_games(path: str) -> pd.DataFrame:
         config.COL_AWAY_SCORE,
     ]
     _ensure_columns(df, required_cols)
+
+    # Diagnostics snapshot
+    diagnostics.write_df_snapshot(df, name="games", step="load")
 
     return df
 

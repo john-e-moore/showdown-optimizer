@@ -1,3 +1,6 @@
 venv/
 data/
+diagnostics/
+outputs/
+models/
 *__pycache__*

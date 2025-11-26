@@ -13,7 +13,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from . import config
+from . import config, diagnostics
 
 
 def _add_is_home_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -263,6 +263,12 @@ def build_pairwise_dataset(
     final_cols = [c for c in final_cols if c in pair_df.columns]
 
     pairwise_df = pair_df[final_cols].copy()
+
+    # Diagnostics snapshot
+    diagnostics.write_df_snapshot(
+        pairwise_df, name="pairwise", step="pairwise_build"
+    )
+
     return pairwise_df
 
 
