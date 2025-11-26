@@ -20,6 +20,7 @@ import time
 import pandas as pd
 
 from . import config
+from .lineup_constraints import build_custom_constraints
 from .lineup_optimizer import (
     Lineup,
     load_players_from_sabersim,
@@ -98,13 +99,16 @@ def main() -> None:
     player_pool = load_players_from_sabersim(csv_path)
     players_by_id = {p.player_id: p for p in player_pool.players}
 
+    # Prepare any custom DFS constraints from the configuration module.
+    constraint_builders = build_custom_constraints()
+
     # Optimize lineups (pattern can be a concrete path) and time the run.
     start_time = time.perf_counter()
     lineups = optimize_showdown_lineups(
         projections_path_pattern=csv_path,
         num_lineups=args.num_lineups,
         salary_cap=args.salary_cap,
-        constraint_builders=None,
+        constraint_builders=constraint_builders,
     )
     elapsed = time.perf_counter() - start_time
 
