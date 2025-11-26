@@ -14,7 +14,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from . import config
+from . import config, diagnostics
 from .build_corr_matrix_from_projections import (
     SABERSIM_DK_PROJ_COL,
     SABERSIM_NAME_COL,
@@ -81,7 +81,9 @@ def _prepare_simulation_players(
     }
     for raw, canonical in stat_map.items():
         if raw in df.columns:
-            df[canonical] = df[raw].astype(float)
+            # Treat missing entries as zeros so NaNs do not propagate into team
+            # totals or simulated stats.
+            df[canonical] = df[raw].astype(float).fillna(0.0)
         else:
             df[canonical] = 0.0
 
@@ -95,13 +97,27 @@ def _prepare_simulation_players(
     for team_name, team_df in grouped:
         idx = team_df.index.to_numpy()
 
-        proj_pass_yards = team_df[config.COL_PASS_YARDS].to_numpy(dtype=float)
-        proj_pass_tds = team_df[config.COL_PASS_TDS].to_numpy(dtype=float)
-        proj_rush_yards = team_df[config.COL_RUSH_YARDS].to_numpy(dtype=float)
-        proj_rush_tds = team_df[config.COL_RUSH_TDS].to_numpy(dtype=float)
-        proj_rec_yards = team_df[config.COL_REC_YARDS].to_numpy(dtype=float)
-        proj_rec_tds = team_df[config.COL_REC_TDS].to_numpy(dtype=float)
-        proj_receptions = team_df[config.COL_RECEPTIONS].to_numpy(dtype=float)
+        proj_pass_yards = np.nan_to_num(
+            team_df[config.COL_PASS_YARDS].to_numpy(dtype=float), nan=0.0
+        )
+        proj_pass_tds = np.nan_to_num(
+            team_df[config.COL_PASS_TDS].to_numpy(dtype=float), nan=0.0
+        )
+        proj_rush_yards = np.nan_to_num(
+            team_df[config.COL_RUSH_YARDS].to_numpy(dtype=float), nan=0.0
+        )
+        proj_rush_tds = np.nan_to_num(
+            team_df[config.COL_RUSH_TDS].to_numpy(dtype=float), nan=0.0
+        )
+        proj_rec_yards = np.nan_to_num(
+            team_df[config.COL_REC_YARDS].to_numpy(dtype=float), nan=0.0
+        )
+        proj_rec_tds = np.nan_to_num(
+            team_df[config.COL_REC_TDS].to_numpy(dtype=float), nan=0.0
+        )
+        proj_receptions = np.nan_to_num(
+            team_df[config.COL_RECEPTIONS].to_numpy(dtype=float), nan=0.0
+        )
         is_qb_mask = team_df["is_qb"].to_numpy(dtype=bool)
 
         # For passing/receiving consistency we treat team passing yards/TDs as
@@ -141,6 +157,45 @@ def _prepare_simulation_players(
             primary_qb_local_idx = int(qb_local_indices[best_rel])
 
         team_infos[team_name]["primary_qb_local_idx"] = primary_qb_local_idx
+
+    # Diagnostics: snapshot canonical per-player inputs used by the simulator.
+    player_input_cols = [
+        "player_name",
+        "team",
+        "position",
+        "dk_proj",
+        config.COL_PASS_YARDS,
+        config.COL_PASS_TDS,
+        config.COL_RUSH_YARDS,
+        config.COL_RUSH_TDS,
+        config.COL_REC_YARDS,
+        config.COL_REC_TDS,
+        config.COL_RECEPTIONS,
+    ]
+    snapshot_df = df[player_input_cols].copy()
+    diagnostics.write_df_snapshot(
+        snapshot_df, name="sim_input_players", step="simulation"
+    )
+
+    # Diagnostics: snapshot per-team stat totals that drive the simulator.
+    team_rows = []
+    for team_name, info in team_infos.items():
+        team_rows.append(
+            {
+                "team": team_name,
+                "n_players": int(len(info["indices"])),
+                "team_tot_rec_yards": float(info["team_tot_rec_yards"]),
+                "team_tot_rec_tds": float(info["team_tot_rec_tds"]),
+                "team_tot_receptions": float(info["team_tot_receptions"]),
+                "team_tot_rush_yards": float(info["team_tot_rush_yards"]),
+                "team_tot_rush_tds": float(info["team_tot_rush_tds"]),
+            }
+        )
+
+    team_totals_df = pd.DataFrame(team_rows)
+    diagnostics.write_df_snapshot(
+        team_totals_df, name="sim_team_totals", step="simulation"
+    )
 
     return df, team_infos
 
@@ -393,6 +448,52 @@ def simulate_corr_matrix_from_projections(
             sim_dk[idx] = dk
 
         dk_points[:, sim_idx] = sim_dk
+
+    # Compute simple DK summary diagnostics per player before building correlations.
+    dk_mean = dk_points.mean(axis=1)
+    dk_std = dk_points.std(axis=1, ddof=0)
+    dk_summary = pd.DataFrame(
+        {
+            "player_name": players_df["player_name"].tolist(),
+            "team": players_df["team"].tolist(),
+            "position": players_df["position"].tolist(),
+            "dk_proj": players_df["dk_proj"].to_numpy(dtype=float),
+            "dk_sim_mean": dk_mean,
+            "dk_sim_std": dk_std,
+        }
+    )
+    diagnostics.write_df_snapshot(
+        dk_summary, name="dk_sim_vs_proj", step="simulation"
+    )
+
+    # Also write a plain CSV copy of the same snapshot for easy inspection.
+    sim_dir = config.DIAGNOSTICS_DIR / "simulation"
+    sim_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = sim_dir / "dk_sim_vs_proj.csv"
+    try:
+        dk_summary.to_csv(csv_path, index=False)
+    except Exception:
+        # Best-effort; mirror Parquet snapshot behavior and don't fail the run
+        # if CSV writing encounters an unexpected issue.
+        pass
+
+    # Debug: write first up-to-100 simulated DK outcomes per player to CSV.
+    n_debug_sims = min(100, n_sims)
+    debug_cols = {
+        "player_name": players_df["player_name"].tolist(),
+        "team": players_df["team"].tolist(),
+        "position": players_df["position"].tolist(),
+    }
+    for j in range(n_debug_sims):
+        debug_cols[f"sim_{j}"] = dk_points[:, j]
+
+    dk_first100_df = pd.DataFrame(debug_cols)
+    first100_path = sim_dir / "dk_points_first_100.csv"
+    try:
+        dk_first100_df.to_csv(first100_path, index=False)
+    except Exception:
+        # Same best-effort semantics as other diagnostics.
+        pass
 
     # Compute empirical correlation matrix across players.
     corr = np.corrcoef(dk_points, rowvar=True)
