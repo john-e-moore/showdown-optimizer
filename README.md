@@ -92,3 +92,20 @@ python -m src.main \
   --output-excel outputs/correlations/your_corr_matrix.xlsx
 ```
 
+### Running the lineup optimizer (MILP-based)
+
+From the project root, after installing dependencies:
+
+```bash
+python -m src.showdown_optimizer_main \
+  --sabersim-glob "data/sabersim/NFL_*.csv" \
+  --num-lineups 20 \
+  --salary-cap 50000
+```
+
+This will:
+- Load Sabersim projections from the CSV matched by `--sabersim-glob`.
+- Build valid DraftKings Showdown lineups (1 CPT, 5 FLEX, 6 distinct players).
+- Maximize mean projected DK fantasy points under the given salary cap.
+
+
