@@ -34,15 +34,15 @@
 - In `src/main.py`:
 - Remove imports and logic for `build_pairwise_dataset`, `fantasy_scoring`, `feature_engineering`, and `train_corr_model`.
 - Drop the `--retrain` and `--corr-method` flags; keep a minimal CLI with:
-  - `--sabersim-csv` (override `config.SABERSIM_CSV`).
-  - `--output-excel` (override `config.OUTPUT_CORR_EXCEL`).
-  - `--n-sims` (override `config.SIM_N_GAMES`).
+- `--sabersim-csv` (override `config.SABERSIM_CSV`).
+- `--output-excel` (override `config.OUTPUT_CORR_EXCEL`).
+- `--n-sims` (override `config.SIM_N_GAMES`).
 - The main flow becomes:
 
-  1. Ensure output/diagnostics directories exist.
-  2. Load Sabersim projections via `load_sabersim_projections`.
-  3. Call `simulate_corr_matrix_from_projections` to get the correlation matrix.
-  4. Write projections + correlation matrix to Excel.
+1. Ensure output/diagnostics directories exist.
+2. Load Sabersim projections via `load_sabersim_projections`.
+3. Call `simulate_corr_matrix_from_projections` to get the correlation matrix.
+4. Write projections + correlation matrix to Excel.
 
 - Optionally add a separate small CLI entry (or flag) if you want to run `download_nfl_data` from `main.py`; otherwise, leave it as a standalone script.
 
@@ -51,8 +51,8 @@
 - Keep `src/download_nfl_data.py` mostly as-is, but:
 - Confirm which pieces of `config` and `data_loading` it uses.
 - If `data_loading.py` is mostly training-oriented, either:
-  - Keep only the parts needed by the downloader (e.g., column normalization), or
-  - Inline minimal loading/normalization logic into `download_nfl_data.py` and remove `data_loading.py` entirely.
+- Keep only the parts needed by the downloader (e.g., column normalization), or
+- Inline minimal loading/normalization logic into `download_nfl_data.py` and remove `data_loading.py` entirely.
 - Ensure the README documents how to run the downloader as a separate step, if you still plan to use those Parquet files for other analysis.
 
 ### 5. Update diagnostics to focus on simulation
@@ -68,8 +68,8 @@
 - Describe the project as a **simulation-based** NFL Showdown correlation generator, with an optional historical data downloader.
 - Remove references to training an ML regression model, z-scores, and `corr_model.pkl`.
 - Show minimal usage examples:
-  - How to run `python -m src.download_nfl_data` (if still relevant).
-  - How to run `python -m src.main` with `--sabersim-csv`, `--n-sims`, and `--output-excel`.
+- How to run `python -m src.download_nfl_data` (if still relevant).
+- How to run `python -m src.main` with `--sabersim-csv`, `--n-sims`, and `--output-excel`.
 - Optionally clean up `requirements.txt` to drop ML-only dependencies (e.g., `scikit-learn`, `joblib`) if nothing else uses them.
 
 This plan will leave you with a lean codebase centered on your simulation engine and keep the historical downloader as a utility, while removing unused ML training code and artifacts.

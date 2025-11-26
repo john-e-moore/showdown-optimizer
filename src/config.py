@@ -167,12 +167,9 @@ def ensure_directories() -> None:
     Ensure that key directories used by the pipeline exist.
 
     This does not create raw-data directories (user is expected to place
-    Parquet files there) but will create processed, models, outputs, and
-    diagnostics dirs.
+    Parquet files there) but will create outputs and diagnostics dirs.
     """
 
-    NFL_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
     CORR_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
