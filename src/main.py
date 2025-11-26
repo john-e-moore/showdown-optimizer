@@ -29,6 +29,7 @@ from . import (
     data_loading,
     fantasy_scoring,
     feature_engineering,
+    simulation_corr,
     train_corr_model,
 )
 
@@ -94,28 +95,56 @@ def main() -> None:
         default=config.OUTPUT_CORR_EXCEL,
         help="Path to output Excel file containing projections and correlation matrix.",
     )
+    parser.add_argument(
+        "--corr-method",
+        type=str,
+        choices=["simulation", "ml"],
+        default=config.DEFAULT_CORR_METHOD,
+        help=(
+            "Method for building the player correlation matrix from Sabersim "
+            "projections: 'simulation' (Monte Carlo, default) or 'ml' "
+            "(historical regression model)."
+        ),
+    )
+    parser.add_argument(
+        "--n-sims",
+        type=int,
+        default=config.SIM_N_GAMES,
+        help="Number of Monte Carlo simulations to run when corr-method=simulation.",
+    )
 
     args = parser.parse_args()
 
     config.ensure_directories()
 
-    if args.retrain or not Path(config.CORR_MODEL_PATH).exists():
+    # Only train or require the ML model when it will be used.
+    use_ml = args.corr_method == "ml"
+    if use_ml and (args.retrain or not Path(config.CORR_MODEL_PATH).exists()):
         _train_historical_model()
-
-    print("Loading trained correlation model...")
-    model = _load_model()
 
     print(f"Loading Sabersim projections from {args.sabersim_csv}...")
     sabersim_df = build_corr_matrix_from_projections.load_sabersim_projections(
         args.sabersim_csv
     )
 
-    print("Building player correlation matrix...")
-    corr_matrix = (
-        build_corr_matrix_from_projections.build_corr_matrix_from_sabersim(
-            model, sabersim_df
+    if use_ml:
+        print("Loading trained correlation model...")
+        model = _load_model()
+
+        print("Building player correlation matrix with ML model...")
+        corr_matrix = (
+            build_corr_matrix_from_projections.build_corr_matrix_from_sabersim(
+                model, sabersim_df
+            )
         )
-    )
+    else:
+        print(
+            f"Building player correlation matrix via simulation "
+            f"({args.n_sims} simulated games)..."
+        )
+        corr_matrix = simulation_corr.simulate_corr_matrix_from_projections(
+            sabersim_df, n_sims=args.n_sims
+        )
 
     print(f"Writing Excel output to {args.output_excel}...")
     output_path = Path(args.output_excel)

@@ -3,13 +3,21 @@
 This project implements the first-stage pipeline for modeling player-to-player
 fantasy point correlations for DraftKings NFL Showdown contests.
 
-The pipeline:
+The pipeline now supports two ways to estimate player-to-player correlations:
+- **Simulation-based (default)**: Monte Carlo simulator that uses Sabersim
+  box-score projections to generate many joint game outcomes and computes an
+  empirical correlation matrix of DraftKings fantasy points.
+- **ML-based**: Historical regression model trained on nflverse data using
+  a z-score product target to approximate correlations.
+
+At a high level, the project:
 - Ingests historical nflverse-style Parquet data.
 - Computes DraftKings-style offensive fantasy points and per-player z-scores.
 - Builds a pairwise training dataset using the z-score product trick.
 - Trains a tree-based regression model to predict pairwise correlations.
-- Applies the model to a Sabersim Showdown projections CSV to produce a
-  player correlation matrix and writes it to an Excel file.
+- Applies either the simulation engine or the ML model to a Sabersim Showdown
+  projections CSV to produce a player correlation matrix and writes it to an
+  Excel file.
 
 ### Project layout
 
@@ -49,6 +57,13 @@ You can also adjust:
 - `MIN_PLAYER_GAMES` (minimum games per player for stable z-scores).
 - Season ranges for train/validation/test splits.
 - Offensive positions to include.
+- Simulation settings:
+  - `DEFAULT_CORR_METHOD` (defaults to `"simulation"`).
+  - `SIM_N_GAMES` (number of Monte Carlo simulations).
+  - `SIM_RANDOM_SEED` (seed or `None` for nondeterministic).
+  - `SIM_DIRICHLET_K_YARDS`, `SIM_DIRICHLET_K_RECEPTIONS`,
+    `SIM_DIRICHLET_K_TDS` (how tightly simulated stat shares cluster around
+    projections).
 
 ### Downloading historical NFL data
 
@@ -66,7 +81,7 @@ This will create:
 The downloader normalizes columns so they align with `src/config.py` and
 `src/data_loading.py`.
 
-### Running the correlation pipeline
+### Running the correlation pipeline (simulation-based, default)
 
 From the project root:
 
@@ -74,34 +89,45 @@ From the project root:
 python -m src.main
 ```
 
-On the first run, if no model exists at `models/corr_model.pkl`, the script
+By default this will:
+1. Load Sabersim projections from `config.SABERSIM_CSV`.
+2. Run `SIM_N_GAMES` Monte Carlo simulations of team-level stat pools and
+   allocate them to players using Dirichlet/multinomial sampling.
+3. Compute the empirical correlation matrix of DK fantasy points across all
+   FLEX players in that slate.
+4. Write an Excel file to `config.OUTPUT_CORR_EXCEL` with:
+   - Sheet `Sabersim_Projections`: FLEX-only Sabersim projections.
+   - Sheet `Correlation_Matrix`: symmetric correlation matrix with
+     player names as both rows and columns.
+
+You can override the Sabersim CSV, number of simulations, and output paths:
+
+```bash
+python -m src.main \
+  --sabersim-csv data/sabersim/your_showdown_file.csv \
+  --n-sims 8000 \
+  --output-excel outputs/correlations/your_corr_matrix.xlsx
+```
+
+### Using the historical ML model instead of simulation
+
+If you want to use the regression model trained on historical nflverse data,
+run:
+
+```bash
+python -m src.main --corr-method ml
+```
+
+On the first ML run, if no model exists at `models/corr_model.pkl`, the script
 will:
 1. Load historical data from `data/nfl_raw/`.
 2. Compute DK offensive fantasy points and per-player z-scores.
 3. Build the pairwise training dataset.
 4. Train the correlation regression model and save it.
 
-Then it will:
-1. Load Sabersim projections from `config.SABERSIM_CSV`.
-2. Build a correlation matrix across all FLEX players in that slate.
-3. Write an Excel file to `config.OUTPUT_CORR_EXCEL` with:
-   - Sheet `Sabersim_Projections`: FLEX-only Sabersim projections.
-   - Sheet `Correlation_Matrix`: symmetric correlation matrix with
-     player names as both rows and columns.
-
 You can force retraining with:
 
 ```bash
-python -m src.main --retrain
+python -m src.main --corr-method ml --retrain
 ```
-
-You can also override the Sabersim CSV and output paths:
-
-```bash
-python -m src.main \
-  --sabersim-csv data/sabersim/your_showdown_file.csv \
-  --output-excel outputs/correlations/your_corr_matrix.xlsx
-```
-
-
 
