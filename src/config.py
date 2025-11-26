@@ -130,17 +130,46 @@ RAW_TO_CANONICAL_STATS: Final[Dict[str, str]] = {
 }
 
 
+"""
+Simulation configuration
+------------------------
+
+These settings control the Monte Carlo simulator used to build a correlation
+matrix directly from Sabersim projections.
+"""
+
+# Default method for building the correlation matrix from Sabersim projections.
+# Options are:
+#   - "simulation": Monte Carlo simulator (default)
+#   - "ml": historical ML regression model (z-score product)
+DEFAULT_CORR_METHOD: Final[str] = "simulation"
+
+# Number of Monte Carlo simulations (games) to run per Showdown slate.
+SIM_N_GAMES: Final[int] = 5000
+
+# Random seed for the simulator (set to None to use nondeterministic seed).
+SIM_RANDOM_SEED: Final[int | None] = 42
+
+# Dirichlet concentration parameters that control how tightly player stat
+# shares cluster around their projected shares. Higher values => lower
+# variance around projections.
+SIM_DIRICHLET_K_YARDS: Final[float] = 50.0
+SIM_DIRICHLET_K_RECEPTIONS: Final[float] = 50.0
+SIM_DIRICHLET_K_TDS: Final[float] = 20.0
+
+# Small epsilon used when guarding against division by zero in share
+# computations.
+SIM_EPS: Final[float] = 1e-9
+
+
 def ensure_directories() -> None:
     """
     Ensure that key directories used by the pipeline exist.
 
     This does not create raw-data directories (user is expected to place
-    Parquet files there) but will create processed, models, outputs, and
-    diagnostics dirs.
+    Parquet files there) but will create outputs and diagnostics dirs.
     """
 
-    NFL_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
     CORR_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 

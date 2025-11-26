@@ -1,24 +1,20 @@
 ## NFL Showdown Correlation Pipeline
 
-This project implements the first-stage pipeline for modeling player-to-player
+This project implements a simulation-based pipeline for modeling player-to-player
 fantasy point correlations for DraftKings NFL Showdown contests.
 
-The pipeline:
-- Ingests historical nflverse-style Parquet data.
-- Computes DraftKings-style offensive fantasy points and per-player z-scores.
-- Builds a pairwise training dataset using the z-score product trick.
-- Trains a tree-based regression model to predict pairwise correlations.
-- Applies the model to a Sabersim Showdown projections CSV to produce a
-  player correlation matrix and writes it to an Excel file.
+The core of the project is a Monte Carlo simulator that uses Sabersim
+box-score projections to generate many joint game outcomes and computes an
+empirical correlation matrix of DraftKings fantasy points. A separate helper
+script can optionally download and normalize historical NFL data for your own
+analysis, but no ML model training is required for the correlation pipeline.
 
 ### Project layout
 
 - `data/nfl_raw/`: nflverse Parquet files (player stats and games/schedule).
-- `data/nfl_processed/`: processed player-game data with DK points and z-scores.
 - `data/sabersim/`: Sabersim Showdown projections CSVs.
-- `models/`: trained correlation model (`corr_model.pkl`).
 - `outputs/correlations/`: Excel outputs with projections + correlation matrix.
-- `src/`: Python package with all pipeline code.
+- `src/`: Python package with all pipeline and diagnostics code.
 
 ### Dependencies
 
@@ -30,7 +26,6 @@ pip install -r requirements.txt
 
 Key libraries:
 - `pandas`, `numpy` for data handling.
-- `scikit-learn`, `joblib` for modeling.
 - `xlsxwriter` for Excel output.
 - `pyarrow` for Parquet IO.
 - `nfl_data_py` for downloading historical NFL data.
@@ -46,14 +41,18 @@ Sabersim CSVs. By default it expects:
 - Output Excel: `outputs/correlations/showdown_corr_matrix.xlsx`
 
 You can also adjust:
-- `MIN_PLAYER_GAMES` (minimum games per player for stable z-scores).
-- Season ranges for train/validation/test splits.
 - Offensive positions to include.
+- Simulation settings:
+  - `SIM_N_GAMES` (number of Monte Carlo simulations).
+  - `SIM_RANDOM_SEED` (seed or `None` for nondeterministic).
+  - `SIM_DIRICHLET_K_YARDS`, `SIM_DIRICHLET_K_RECEPTIONS`,
+    `SIM_DIRICHLET_K_TDS` (how tightly simulated stat shares cluster around
+    projections).
 
-### Downloading historical NFL data
+### Downloading historical NFL data (optional)
 
-Before running the correlation pipeline, populate the raw Parquet files using
-`nfl_data_py`:
+If you want local Parquet files of historical NFL games and player stats for
+your own analysis, you can populate `data/nfl_raw/` using `nfl_data_py`:
 
 ```bash
 python -m src.download_nfl_data --start-season 2005 --end-season 2024
@@ -63,10 +62,9 @@ This will create:
 - `data/nfl_raw/player_stats.parquet`
 - `data/nfl_raw/games.parquet`
 
-The downloader normalizes columns so they align with `src/config.py` and
-`src/data_loading.py`.
+The downloader normalizes columns so they align with `src/config.py`.
 
-### Running the correlation pipeline
+### Running the correlation pipeline (simulation-based)
 
 From the project root:
 
@@ -74,34 +72,23 @@ From the project root:
 python -m src.main
 ```
 
-On the first run, if no model exists at `models/corr_model.pkl`, the script
-will:
-1. Load historical data from `data/nfl_raw/`.
-2. Compute DK offensive fantasy points and per-player z-scores.
-3. Build the pairwise training dataset.
-4. Train the correlation regression model and save it.
-
-Then it will:
+By default this will:
 1. Load Sabersim projections from `config.SABERSIM_CSV`.
-2. Build a correlation matrix across all FLEX players in that slate.
-3. Write an Excel file to `config.OUTPUT_CORR_EXCEL` with:
+2. Run `SIM_N_GAMES` Monte Carlo simulations of team-level stat pools and
+   allocate them to players using Dirichlet/multinomial sampling.
+3. Compute the empirical correlation matrix of DK fantasy points across all
+   FLEX players in that slate.
+4. Write an Excel file to `config.OUTPUT_CORR_EXCEL` with:
    - Sheet `Sabersim_Projections`: FLEX-only Sabersim projections.
    - Sheet `Correlation_Matrix`: symmetric correlation matrix with
      player names as both rows and columns.
 
-You can force retraining with:
-
-```bash
-python -m src.main --retrain
-```
-
-You can also override the Sabersim CSV and output paths:
+You can override the Sabersim CSV, number of simulations, and output paths:
 
 ```bash
 python -m src.main \
   --sabersim-csv data/sabersim/your_showdown_file.csv \
+  --n-sims 8000 \
   --output-excel outputs/correlations/your_corr_matrix.xlsx
 ```
-
-
 

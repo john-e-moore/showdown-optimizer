@@ -53,15 +53,14 @@ def write_df_snapshot(
     step_dir = config.DIAGNOSTICS_DIR / step
     _safe_ensure_dir(step_dir)
 
-    # Data snapshot
+    # Data snapshot (CSV only)
     sample_df = df.head(max_rows).copy()
-    parquet_path = step_dir / f"{name}.parquet"
+    csv_path = step_dir / f"{name}.csv"
     try:
-        sample_df.to_parquet(parquet_path, index=False)
-    except Exception:
-        # Fallback to CSV if Parquet isn't available for some reason.
-        csv_path = step_dir / f"{name}.csv"
         sample_df.to_csv(csv_path, index=False)
+    except Exception:
+        # Best-effort; if CSV writing fails we still try to write the summary.
+        pass
 
     # Summary statistics
     summary: dict[str, Any] = {

@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 """
-Build a player correlation matrix for a single Sabersim Showdown slate.
+Sabersim projections loading utilities.
 
-This module loads Sabersim projections, constructs pairwise feature rows that
-roughly align with the historical training features, applies the trained
-correlation regression model, and assembles a symmetric correlation matrix.
+This module provides a helper to load a Sabersim Showdown CSV and return a
+FLEX-only dataframe suitable for downstream simulation.
 """
 
 from pathlib import Path
-from typing import List
 
-import numpy as np
 import pandas as pd
 
 from . import config
-from .train_corr_model import CATEGORICAL_FEATURES, NUMERICAL_FEATURES
 
 
 SABERSIM_NAME_COL = "Name"
@@ -55,6 +51,7 @@ def load_sabersim_projections(path: str | Path) -> pd.DataFrame:
         df = df[df[SABERSIM_POS_COL].isin(config.OFFENSIVE_POSITIONS)]
 
     return df
+
 
 
 def _prepare_player_features_from_sabersim(
