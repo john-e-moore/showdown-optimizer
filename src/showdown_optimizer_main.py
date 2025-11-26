@@ -20,7 +20,7 @@ import time
 import pandas as pd
 
 from . import config
-from .lineup_constraints import build_custom_constraints
+from .showdown_constraints import build_custom_constraints
 from .lineup_optimizer import (
     Lineup,
     load_players_from_sabersim,
