@@ -171,6 +171,10 @@ def load_players_from_sabersim(path: str | Path) -> PlayerPool:
             f"Sabersim CSV missing DK projection column '{SABERSIM_DK_PROJ_COL}'."
         )
 
+    # Drop players with zero (or negative) projection; they cannot contribute
+    # positively to an optimal lineup and only slow down the solver.
+    df = df[df[SABERSIM_DK_PROJ_COL] > 0]
+
     # Ensure basic columns exist even if missing in source.
     if SABERSIM_POS_COL not in df.columns:
         df[SABERSIM_POS_COL] = ""

@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from glob import glob
 from pathlib import Path
+import time
 
 import pandas as pd
 
@@ -97,17 +98,32 @@ def main() -> None:
     player_pool = load_players_from_sabersim(csv_path)
     players_by_id = {p.player_id: p for p in player_pool.players}
 
-    # Optimize lineups (pattern can be a concrete path).
+    # Optimize lineups (pattern can be a concrete path) and time the run.
+    start_time = time.perf_counter()
     lineups = optimize_showdown_lineups(
         projections_path_pattern=csv_path,
         num_lineups=args.num_lineups,
         salary_cap=args.salary_cap,
         constraint_builders=None,
     )
+    elapsed = time.perf_counter() - start_time
 
     if not lineups:
         print("No feasible lineups found.")
+        if elapsed < 60.0:
+            print(f"Optimization completed in {elapsed:.2f}s.")
+        else:
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            print(f"Optimization completed in {minutes}m {seconds}s.")
         return
+
+    if elapsed < 60.0:
+        print(f"Optimization completed in {elapsed:.2f}s.")
+    else:
+        minutes = int(elapsed // 60)
+        seconds = int(elapsed % 60)
+        print(f"Optimization completed in {minutes}m {seconds}s.")
 
     print(f"Generated {len(lineups)} lineups.")
 
@@ -241,8 +257,8 @@ def main() -> None:
                 raw_pct = player_cpt_own_pct_by_id.get(player_id, 0.0)
             else:
                 raw_pct = player_flex_own_pct_by_id.get(player_id, 0.0)
-            pct_int = int(round(raw_pct))
-            return f"{player.name} ({pct_int}%)"
+            pct_str = f"{raw_pct:.1f}"
+            return f"{player.name} ({pct_str}%)"
 
         row = {
             "rank": idx + 1,
