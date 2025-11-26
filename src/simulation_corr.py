@@ -495,15 +495,31 @@ def simulate_corr_matrix_from_projections(
         # Same best-effort semantics as other diagnostics.
         pass
 
-    # Compute empirical correlation matrix across players.
-    corr = np.corrcoef(dk_points, rowvar=True)
+    # Drop players whose simulated DK points are identically zero across all sims
+    # from the correlation matrix. These players contribute no variance and
+    # would otherwise lead to degenerate correlations.
+    has_activity = (dk_points != 0.0).any(axis=1)
+    active_idx = np.nonzero(has_activity)[0]
+
+    if active_idx.size == 0:
+        # Fallback: no active players; return an identity matrix over all players.
+        player_names = players_df["player_name"].tolist()
+        corr_df = pd.DataFrame(
+            np.eye(len(player_names)), index=player_names, columns=player_names
+        )
+        return corr_df
+
+    dk_points_active = dk_points[has_activity, :]
+
+    # Compute empirical correlation matrix across active players only.
+    corr = np.corrcoef(dk_points_active, rowvar=True)
     corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Ensure perfect self-correlation on the diagonal.
     np.fill_diagonal(corr, 1.0)
 
-    player_names = players_df["player_name"].tolist()
-    corr_df = pd.DataFrame(corr, index=player_names, columns=player_names, dtype=float)
+    active_names = players_df.loc[has_activity, "player_name"].tolist()
+    corr_df = pd.DataFrame(corr, index=active_names, columns=active_names, dtype=float)
     return corr_df
 
 
