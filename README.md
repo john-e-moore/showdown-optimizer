@@ -108,4 +108,25 @@ This will:
 - Build valid DraftKings Showdown lineups (1 CPT, 5 FLEX, 6 distinct players).
 - Maximize mean projected DK fantasy points under the given salary cap.
 
+You can also control how many lineups are solved per MILP model using the
+`--chunk-size` flag:
+
+```bash
+python -m src.showdown_optimizer_main \
+  --sabersim-glob "data/sabersim/NFL_*.csv" \
+  --num-lineups 5000 \
+  --salary-cap 50000 \
+  --chunk-size 50
+```
+
+With chunking enabled, the optimizer:
+- Solves for lineups in batches of `--chunk-size`, rebuilding a fresh MILP for
+  each batch to keep model size roughly constant.
+- Applies a projection cap between batches so that each new batch targets
+  lineups strictly below the worst projection from the previous batch.
+
+Setting `--chunk-size` to `0` (or a negative value) disables chunking and
+reverts to the original behavior that uses a single model with a growing set of
+no-duplicate constraints.
+
 

@@ -75,6 +75,16 @@ def main() -> None:
         default=50_000,
         help="DraftKings Showdown salary cap.",
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=50,
+        help=(
+            "Number of lineups to solve per MILP chunk when generating many "
+            "lineups. Set to 0 or a negative value to disable chunking and "
+            "use a single growing model (legacy behavior)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -109,6 +119,7 @@ def main() -> None:
         num_lineups=args.num_lineups,
         salary_cap=args.salary_cap,
         constraint_builders=constraint_builders,
+        chunk_size=args.chunk_size,
     )
     elapsed = time.perf_counter() - start_time
 

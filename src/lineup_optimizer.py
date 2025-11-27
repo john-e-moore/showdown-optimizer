@@ -553,11 +553,53 @@ def solve_single_lineup(
     return _extract_lineup_from_solution(player_pool, x)
 
 
+def _build_showdown_model_with_constraints(
+    player_pool: PlayerPool,
+    salary_cap: int,
+    constraint_builders: Optional[Sequence[ConstraintBuilder]] = None,
+) -> Tuple[pulp.LpProblem, VarDict]:
+    """
+    Helper to build a fresh MILP model with base + custom constraints applied.
+    """
+    prob, x = build_showdown_model(player_pool, salary_cap)
+    add_base_constraints(prob, x, player_pool, salary_cap)
+
+    if constraint_builders:
+        for builder in constraint_builders:
+            builder(prob, x, player_pool)
+
+    return prob, x
+
+
+def _add_projection_cap_constraint(
+    prob: pulp.LpProblem,
+    x: VarDict,
+    player_pool: PlayerPool,
+    max_projection: float,
+) -> None:
+    """
+    Constrain total projected DK points (with CPT 1.5x) to be at most max_projection.
+
+    The projection expression is aligned with Lineup.projection() and
+    set_mean_projection_objective().
+    """
+    terms = []
+    for p in player_pool.players:
+        terms.append(1.5 * p.dk_proj * x[(p.player_id, CPT_SLOT)])
+        for slot in FLEX_SLOTS:
+            terms.append(p.dk_proj * x[(p.player_id, slot)])
+
+    proj_expr = pulp.lpSum(terms)
+    prob += proj_expr <= max_projection, "projection_cap"
+
+
 def optimize_showdown_lineups(
     projections_path_pattern: str,
     num_lineups: int,
     salary_cap: int = 50_000,
     constraint_builders: Optional[Sequence[ConstraintBuilder]] = None,
+    chunk_size: Optional[int] = None,
+    projection_eps: float = 1e-4,
 ) -> List[Lineup]:
     """
     Generate up to num_lineups optimal lineups from Sabersim projections.
@@ -583,38 +625,99 @@ def optimize_showdown_lineups(
     csv_path = matches[0]
     player_pool = load_players_from_sabersim(csv_path)
 
-    prob, x = build_showdown_model(player_pool, salary_cap)
-    add_base_constraints(prob, x, player_pool, salary_cap)
+    # If chunking is disabled, fall back to legacy behavior: single model with
+    # a growing set of no-duplicate constraints.
+    if not chunk_size or chunk_size <= 0:
+        prob, x = _build_showdown_model_with_constraints(
+            player_pool, salary_cap, constraint_builders
+        )
+        set_mean_projection_objective(prob, x, player_pool)
 
-    if constraint_builders:
-        for builder in constraint_builders:
-            builder(prob, x, player_pool)
+        solver = pulp.PULP_CBC_CMD(msg=False)
+        lineups: List[Lineup] = []
 
-    set_mean_projection_objective(prob, x, player_pool)
+        for k in range(num_lineups):
+            prob.solve(solver)
+            status_str = pulp.LpStatus.get(prob.status, "Unknown")
+            if status_str != "Optimal":
+                break
 
+            lineup = _extract_lineup_from_solution(player_pool, x)
+            lineups.append(lineup)
+
+            # Add a no-duplicate constraint so that the next solution differs
+            # by at least one player (CPT or FLEX).
+            used_player_ids = lineup.as_tuple_ids()
+            no_dup_expr = pulp.lpSum(
+                x[(pid, slot)] for pid in used_player_ids for slot in SLOTS
+            )
+            # 6 distinct players in a valid lineup; force at most 5 of them to
+            # appear together next time.
+            prob += no_dup_expr <= 5, f"no_duplicate_lineup_{k}"
+
+        return lineups
+
+    # Chunked behavior: repeatedly build fresh models with an upper bound on
+    # allowed projection, and extract up to chunk_size unique lineups per model.
     solver = pulp.PULP_CBC_CMD(msg=False)
-    lineups: List[Lineup] = []
+    all_lineups: List[Lineup] = []
+    remaining = num_lineups
+    prev_min_proj: Optional[float] = None
+    chunk_index = 0
 
-    for k in range(num_lineups):
-        prob.solve(solver)
-        status_str = pulp.LpStatus.get(prob.status, "Unknown")
-        if status_str != "Optimal":
+    while remaining > 0:
+        current_chunk_size = min(remaining, chunk_size)
+
+        prob, x = _build_showdown_model_with_constraints(
+            player_pool, salary_cap, constraint_builders
+        )
+
+        if prev_min_proj is not None:
+            _add_projection_cap_constraint(
+                prob, x, player_pool, max_projection=prev_min_proj - projection_eps
+            )
+
+        set_mean_projection_objective(prob, x, player_pool)
+
+        chunk_min_proj: Optional[float] = None
+
+        for j in range(current_chunk_size):
+            prob.solve(solver)
+            status_str = pulp.LpStatus.get(prob.status, "Unknown")
+            if status_str != "Optimal":
+                # No more feasible/optimal solutions within this chunk.
+                break
+
+            lineup = _extract_lineup_from_solution(player_pool, x)
+            lineup_proj = lineup.projection()
+            all_lineups.append(lineup)
+            remaining -= 1
+
+            if chunk_min_proj is None or lineup_proj < chunk_min_proj:
+                chunk_min_proj = lineup_proj
+
+            # Add a no-duplicate constraint within this chunk so that the next
+            # solution differs by at least one player (CPT or FLEX).
+            used_player_ids = lineup.as_tuple_ids()
+            no_dup_expr = pulp.lpSum(
+                x[(pid, slot)] for pid in used_player_ids for slot in SLOTS
+            )
+            prob += (
+                no_dup_expr <= 5,
+                f"no_duplicate_lineup_chunk{chunk_index}_{j}",
+            )
+
+            if remaining <= 0:
+                break
+
+        if chunk_min_proj is None:
+            # This chunk could not find any feasible lineups; stop overall.
             break
 
-        lineup = _extract_lineup_from_solution(player_pool, x)
-        lineups.append(lineup)
+        prev_min_proj = chunk_min_proj
+        chunk_index += 1
 
-        # Add a no-duplicate constraint so that the next solution differs
-        # by at least one player (CPT or FLEX).
-        used_player_ids = lineup.as_tuple_ids()
-        no_dup_expr = pulp.lpSum(
-            x[(pid, slot)] for pid in used_player_ids for slot in SLOTS
-        )
-        # 6 distinct players in a valid lineup; force at most 5 of them to
-        # appear together next time.
-        prob += no_dup_expr <= 5, f"no_duplicate_lineup_{k}"
-
-    return lineups
+    return all_lineups
 
 
 
