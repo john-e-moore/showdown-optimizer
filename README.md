@@ -130,3 +130,44 @@ reverts to the original behavior that uses a single model with a growing set of
 no-duplicate constraints.
 
 
+### Estimating top 1% finish probabilities for lineups
+
+After generating a correlation workbook and a lineup workbook, you can
+estimate the probability that each lineup finishes in the top 1% of a
+large-field DraftKings Showdown contest.
+
+From the project root:
+
+```bash
+python -m src.top1pct_finish_rate --field-size 23529
+```
+
+This will:
+- Automatically pick the most recent `.xlsx` in `outputs/lineups/` as the
+  lineup workbook.
+- Automatically pick the most recent `.xlsx` in `outputs/correlations/` as
+  the correlation workbook.
+- Simulate correlated DK outcomes for all players.
+- Use ownership projections to approximate the field's score distribution in
+  each simulation.
+- Write an Excel file to `outputs/top1pct/` with:
+  - Sheet `Lineups_Top1Pct`: original lineups plus a new column
+    `top1_pct_finish_rate` (percentage of simulations where the lineup beats
+    the modeled top 1% cutoff).
+  - Sheet `Meta`: basic metadata including field size, number of simulations,
+    and paths to the input workbooks.
+
+You can also specify the input workbooks explicitly:
+
+```bash
+python -m src.top1pct_finish_rate \
+  --field-size 23529 \
+  --lineups-excel outputs/lineups/lineups_YYYYMMDD_HHMMSS.xlsx \
+  --corr-excel outputs/correlations/showdown_corr_matrix.xlsx
+```
+
+The reported probabilities can be interpreted as the chance that a lineup
+finishes inside the top `floor(field_size * 0.01)` entries, under the
+ownership and correlation model described in
+`prompts/02_top1pct_finish_rate.md`.
+
