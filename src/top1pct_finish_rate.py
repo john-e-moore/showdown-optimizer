@@ -467,6 +467,10 @@ def _compute_field_thresholds(
     X: np.ndarray,
     cpt_own: np.ndarray,
     flex_own: np.ndarray,
+    *,
+    field_var_shrink: float,
+    field_z_score: float,
+    flex_var_factor: float,
 ) -> np.ndarray:
     """
     Compute approximate 99th percentile thresholds of the field score distribution.
@@ -490,7 +494,8 @@ def _compute_field_thresholds(
     var_C = mC2 - mu_C**2
     var_C = np.clip(var_C, a_min=0.0, a_max=None)
 
-    # FLEX mixture: per-slot distribution, 5 independent slots.
+    # FLEX mixture: per-slot distribution, nominally 5 slots but with an
+    # optional variance calibration factor to soften the tail.
     pi = flex_own / 5.0
     flex_scores = X  # DK points at FLEX are just X.
     mu_F = flex_scores @ pi
@@ -499,16 +504,19 @@ def _compute_field_thresholds(
     var_F = np.clip(var_F, a_min=0.0, a_max=None)
 
     mu_F_total = 5.0 * mu_F
-    var_F_total = 5.0 * var_F
+    # Calibrated FLEX variance factor k (<= 5.0 ideally).
+    var_F_total = flex_var_factor * var_F
 
     mu_field = mu_C + mu_F_total
     var_field = var_C + var_F_total
     var_field = np.clip(var_field, a_min=0.0, a_max=None)
 
-    # Approximate L_field ~ Normal(mu_field, var_field).
-    z_0_99 = 2.3263478740408408  # 99th percentile of standard normal.
-    std_field = np.sqrt(var_field)
-    thresholds = mu_field + z_0_99 * std_field
+    # Calibrated field variance shrinkage and z-score for the tail.
+    var_field_eff = field_var_shrink * var_field
+    var_field_eff = np.clip(var_field_eff, a_min=0.0, a_max=None)
+
+    std_field = np.sqrt(var_field_eff)
+    thresholds = mu_field + field_z_score * std_field
     return thresholds
 
 
@@ -570,6 +578,9 @@ def run(
     corr_excel: str | None = None,
     num_sims: int = 20_000,
     random_seed: int | None = None,
+    field_var_shrink: float = 0.7,
+    field_z_score: float = 2.0,
+    flex_var_factor: float = 3.5,
 ) -> Path:
     """
     Execute the top 1% finish rate estimation pipeline.
@@ -631,6 +642,9 @@ def run(
         X=X,
         cpt_own=cpt_own,
         flex_own=flex_own,
+        field_var_shrink=field_var_shrink,
+        field_z_score=field_z_score,
+        flex_var_factor=flex_var_factor,
     )
 
     # ------------------------------------------------------------------
@@ -725,6 +739,9 @@ def run(
     meta_rows = [
         {"key": "field_size", "value": field_size},
         {"key": "num_sims", "value": num_sims},
+        {"key": "field_var_shrink", "value": field_var_shrink},
+        {"key": "field_z_score", "value": field_z_score},
+        {"key": "flex_var_factor", "value": flex_var_factor},
         {"key": "lineups_workbook", "value": str(lineups_path)},
         {"key": "correlation_workbook", "value": str(corr_path)},
         {"key": "n_players", "value": len(player_names)},
@@ -781,6 +798,33 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Number of Monte Carlo simulations to run (default: 20000).",
     )
     parser.add_argument(
+        "--field-var-shrink",
+        type=float,
+        default=0.7,
+        help=(
+            "Multiplicative shrinkage factor for the modeled field variance "
+            "(0 < value <= 1, default: 0.7)."
+        ),
+    )
+    parser.add_argument(
+        "--field-z",
+        type=float,
+        default=2.0,
+        help=(
+            "Z-score used for the upper tail of the field score distribution "
+            "(default: 2.0, slightly below the canonical 99th percentile 2.326)."
+        ),
+    )
+    parser.add_argument(
+        "--flex-var-factor",
+        type=float,
+        default=3.5,
+        help=(
+            "Effective variance factor for the aggregate FLEX component "
+            "(<= 5.0; default: 3.5)."
+        ),
+    )
+    parser.add_argument(
         "--random-seed",
         type=int,
         default=None,
@@ -800,6 +844,9 @@ def main(argv: List[str] | None = None) -> None:
         corr_excel=args.corr_excel,
         num_sims=args.num_sims,
         random_seed=args.random_seed,
+        field_var_shrink=args.field_var_shrink,
+        field_z_score=args.field_z,
+        flex_var_factor=args.flex_var_factor,
     )
 
 

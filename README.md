@@ -171,3 +171,17 @@ finishes inside the top `floor(field_size * 0.01)` entries, under the
 ownership and correlation model described in
 `prompts/02_top1pct_finish_rate.md`.
 
+You can optionally tune the calibration of the field distribution:
+
+- `--field-var-shrink`: multiplicative shrinkage on the modeled field variance
+  (default `0.7`). Values closer to `0` pull the top 1% cutoff closer to the
+  mean field score; values near `1` use the raw variance.
+- `--field-z`: z-score applied to the (shrunken) field standard deviation
+  (default `2.0`, slightly below the canonical 99th percentile `2.326`).
+- `--flex-var-factor`: effective variance factor for the aggregate FLEX
+  component (default `3.5`, vs. `5.0` for five independent FLEX slots).
+
+These knobs are intended to produce **realistic relative rankings** of lineups
+by top-1% finish probability (e.g., best lineups a few percent, weakest near
+zero), not perfectly calibrated absolute probabilities.
+
