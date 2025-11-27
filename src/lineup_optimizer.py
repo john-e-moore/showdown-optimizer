@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import time
 
 import pandas as pd
 import pulp
@@ -667,6 +668,8 @@ def optimize_showdown_lineups(
 
     while remaining > 0:
         current_chunk_size = min(remaining, chunk_size)
+        chunk_start = time.perf_counter()
+        before_count = len(all_lineups)
 
         prob, x = _build_showdown_model_with_constraints(
             player_pool, salary_cap, constraint_builders
@@ -712,9 +715,20 @@ def optimize_showdown_lineups(
 
         if chunk_min_proj is None:
             # This chunk could not find any feasible lineups; stop overall.
+            chunk_elapsed = time.perf_counter() - chunk_start
+            print(
+                f"Finished chunk {chunk_index + 1}: 0 lineups "
+                f"(no feasible solutions), time={chunk_elapsed:.2f}s"
+            )
             break
 
         prev_min_proj = chunk_min_proj
+        chunk_elapsed = time.perf_counter() - chunk_start
+        produced = len(all_lineups) - before_count
+        print(
+            f"Finished chunk {chunk_index + 1}: {produced} lineups, "
+            f"time={chunk_elapsed:.2f}s"
+        )
         chunk_index += 1
 
     return all_lineups
