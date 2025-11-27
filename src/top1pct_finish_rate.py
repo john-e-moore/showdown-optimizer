@@ -24,15 +24,15 @@ You can also specify input workbooks explicitly:
         --corr-excel outputs/correlations/showdown_corr_matrix.xlsx
 """
 
-from pathlib import Path
 import argparse
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
-from . import config
+from . import config, diagnostics
 
 
 LINEUPS_SHEET_NAME = "Lineups"
@@ -187,7 +187,8 @@ def _build_player_universe(
     ownership_df: pd.DataFrame,
     sabersim_proj_df: pd.DataFrame,
     corr_df: pd.DataFrame,
-) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    lineups_proj_df: pd.DataFrame,
+) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Build unified player universe and aligned arrays.
 
@@ -238,20 +239,64 @@ def _build_player_universe(
     for n in lineup_player_names:
         _add_name(n)
 
-    # Build mean and std dev from Sabersim projections (+ diagnostics).
+    # ------------------------------------------------------------------
+    # Build mean, std dev, and position from projections sources.
+    # ------------------------------------------------------------------
     sabersim_proj_df = sabersim_proj_df.copy()
     if "My Proj" not in sabersim_proj_df.columns:
         raise KeyError(
             "Correlation Sabersim projections sheet missing 'My Proj' column."
         )
     sabersim_proj_df["Name"] = sabersim_proj_df["Name"].astype(str)
-    proj_indexed = sabersim_proj_df.set_index("Name")
+    corr_proj_indexed = sabersim_proj_df.set_index("Name")
 
-    # Optional dk_std column.
-    if "dk_std" in proj_indexed.columns:
-        dk_std_series = proj_indexed["dk_std"]
+    # Optional dk_std / Pos columns from correlation projections.
+    if "dk_std" in corr_proj_indexed.columns:
+        dk_std_corr = corr_proj_indexed["dk_std"].astype(float)
     else:
-        dk_std_series = pd.Series(index=proj_indexed.index, dtype=float)
+        dk_std_corr = pd.Series(index=corr_proj_indexed.index, dtype=float)
+    if "Pos" in corr_proj_indexed.columns:
+        pos_corr = corr_proj_indexed["Pos"].astype(str)
+    else:
+        pos_corr = pd.Series(index=corr_proj_indexed.index, dtype=str)
+
+    # Secondary projections source from the lineup optimizer workbook.
+    lineups_proj_df = lineups_proj_df.copy()
+    required_lp = ["Name", "Team", "Salary", "My Proj"]
+    missing_lp = [c for c in required_lp if c not in lineups_proj_df.columns]
+    if missing_lp:
+        raise KeyError(
+            "Lineups projections sheet missing required columns "
+            f"{missing_lp}."
+        )
+    lineups_proj_df["Name"] = lineups_proj_df["Name"].astype(str)
+    lineups_proj_df["Team"] = lineups_proj_df["Team"].astype(str)
+    # Keep lowest-salary row per (Name, Team) as FLEX-equivalent.
+    lineups_proj_df = (
+        lineups_proj_df.sort_values(
+            by=["Name", "Team", "Salary"], ascending=[True, True, True]
+        )
+        .groupby(["Name", "Team"], as_index=False)
+        .first()
+    )
+    lp_indexed = lineups_proj_df.set_index("Name")
+
+    mu_corr = corr_proj_indexed["My Proj"].astype(float)
+    mu_lp = lp_indexed["My Proj"].astype(float)
+
+    # Optional dk_std / Pos from lineup projections.
+    if "dk_std" in lp_indexed.columns:
+        dk_std_lp = lp_indexed["dk_std"].astype(float)
+    else:
+        dk_std_lp = pd.Series(index=lp_indexed.index, dtype=float)
+    if "Pos" in lp_indexed.columns:
+        pos_lp = lp_indexed["Pos"].astype(str)
+    else:
+        pos_lp = pd.Series(index=lp_indexed.index, dtype=str)
+
+    # Combine dk_std from correlation projections, then lineup projections,
+    # and finally simulation-based std devs.
+    dk_std_series = dk_std_corr.combine_first(dk_std_lp)
 
     # Optionally overlay simulation-based std devs.
     sim_std_by_name = _load_simulation_stddevs()
@@ -260,12 +305,19 @@ def _build_player_universe(
         # Only use sim std where we have it; leave others as dk_std / NaN.
         dk_std_series = dk_std_series.combine_first(sim_std_series)
 
+    # Combine positions with preference for correlation projections, then
+    # lineup projections.
+    pos_series = pos_corr.combine_first(pos_lp)
+
     mu_list: List[float] = []
     sigma_list: List[float] = []
+    pos_list: List[str] = []
 
     for name in universe_names:
-        if name in proj_indexed.index:
-            mu_val = float(proj_indexed.at[name, "My Proj"])
+        if name in mu_corr.index:
+            mu_val = float(mu_corr.at[name])
+        elif name in mu_lp.index:
+            mu_val = float(mu_lp.at[name])
         else:
             # If the player is completely unknown to projections, fall back to 0.
             mu_val = 0.0
@@ -277,11 +329,18 @@ def _build_player_universe(
             # Ensure strictly positive to avoid degenerate covariance.
             sigma_val = max(1.0, 0.7 * max(mu_val, 0.0))
 
+        if name in pos_series.index and pd.notna(pos_series.at[name]):
+            pos_val = str(pos_series.at[name])
+        else:
+            pos_val = ""
+
         mu_list.append(mu_val)
         sigma_list.append(sigma_val)
+        pos_list.append(pos_val)
 
     mu = np.array(mu_list, dtype=float)
     sigma = np.array(sigma_list, dtype=float)
+    positions = np.array(pos_list, dtype=object)
 
     # Ownership: convert percentage columns to fractions.
     expected_own_cols = {"player", "cpt_ownership", "flex_ownership"}
@@ -320,7 +379,7 @@ def _build_player_universe(
     cpt_own = np.array(cpt_own_list, dtype=float)
     flex_own = np.array(flex_own_list, dtype=float)
 
-    return universe_names, mu, sigma, cpt_own, flex_own
+    return universe_names, mu, sigma, cpt_own, flex_own, positions
 
 
 def _build_full_correlation(
@@ -505,37 +564,6 @@ def _build_lineup_weights(
     return W
 
 
-def _estimate_top1pct_probs(
-    X: np.ndarray,
-    W: np.ndarray,
-    thresholds: np.ndarray,
-) -> np.ndarray:
-    """
-    Estimate top 1% probabilities for each lineup.
-
-    Args:
-        X: player scores, shape (S, P).
-        W: lineup weight matrix, shape (K, P).
-        thresholds: field 99th percentile scores, shape (S,).
-
-    Returns:
-        p_top1: array of shape (K,) with estimated probabilities.
-    """
-    S, P = X.shape
-    K = W.shape[0]
-    if W.shape[1] != P:
-        raise ValueError("Weight matrix W has incompatible player dimension.")
-    if thresholds.shape[0] != S:
-        raise ValueError("Thresholds array must have length equal to num_sims.")
-
-    # scores[s, k] = sum_i w_k[i] * X[s, i]
-    scores = X @ W.T  # shape (S, K)
-    # Broadcast thresholds over K lineups.
-    indicators = scores >= thresholds[:, None]
-    p_top1 = indicators.mean(axis=0)
-    return p_top1
-
-
 def run(
     field_size: int,
     lineups_excel: str | None = None,
@@ -559,7 +587,7 @@ def run(
     print(f"Using lineups workbook: {lineups_path}")
     print(f"Using correlation workbook: {corr_path}")
 
-    lineups_df, ownership_df, _ = _load_lineups_workbook(lineups_path)
+    lineups_df, ownership_df, lineups_proj_df = _load_lineups_workbook(lineups_path)
     sabersim_proj_df, corr_df = _load_corr_workbook(corr_path)
 
     (
@@ -568,11 +596,13 @@ def run(
         sigma,
         cpt_own,
         flex_own,
+        positions,
     ) = _build_player_universe(
         lineups_df=lineups_df,
         ownership_df=ownership_df,
         sabersim_proj_df=sabersim_proj_df,
         corr_df=corr_df,
+        lineups_proj_df=lineups_proj_df,
     )
 
     corr_full = _build_full_correlation(player_names, corr_df)
@@ -592,6 +622,10 @@ def run(
         rng=rng,
     )
 
+    # Floor simulated DK points at 0 for all non-DST, non-K positions.
+    non_dst_k_mask = ~np.isin(positions, ["DST", "K"])
+    X[:, non_dst_k_mask] = np.maximum(X[:, non_dst_k_mask], 0.0)
+
     print("Computing field 99th percentile thresholds from ownership...")
     thresholds = _compute_field_thresholds(
         X=X,
@@ -599,10 +633,84 @@ def run(
         flex_own=flex_own,
     )
 
+    # ------------------------------------------------------------------
+    # Diagnostics: player universe and sample of correlated player scores.
+    # ------------------------------------------------------------------
+    player_universe_df = pd.DataFrame(
+        {
+            "player_name": player_names,
+            "mu": mu,
+            "sigma": sigma,
+            "position": positions,
+            "cpt_own": cpt_own,
+            "flex_own": flex_own,
+            "total_own": cpt_own + flex_own,
+        }
+    )
+    diagnostics.write_df_snapshot(
+        player_universe_df,
+        name="player_universe",
+        step="top1pct",
+        max_rows=1000,
+    )
+
+    # Sample of correlated player scores across the first up-to-100 simulations.
+    n_debug_sims_players = int(min(100, X.shape[0]))
+    debug_player_cols: Dict[str, object] = {"player_name": player_names}
+    for j in range(n_debug_sims_players):
+        debug_player_cols[f"sim_{j}"] = X[j, :]
+    player_scores_df = pd.DataFrame(debug_player_cols)
+    diagnostics.write_df_snapshot(
+        player_scores_df,
+        name="player_scores",
+        step="top1pct",
+        max_rows=1000,
+    )
+
     player_index = {name: i for i, name in enumerate(player_names)}
     print("Scoring lineups across simulations...")
     W = _build_lineup_weights(lineups_df=lineups_df, player_index=player_index)
-    p_top1 = _estimate_top1pct_probs(X=X, W=W, thresholds=thresholds)
+
+    # scores[s, k] = sum_i w_k[i] * X[s, i]
+    scores = X @ W.T  # shape (S, K)
+    if thresholds.shape[0] != scores.shape[0]:
+        raise ValueError("Thresholds array must have length equal to num_sims.")
+
+    indicators = scores >= thresholds[:, None]
+    p_top1 = indicators.mean(axis=0)
+
+    # Diagnostics: lineup scores and summary statistics.
+    n_debug_sims_lineups = int(min(100, scores.shape[0]))
+    n_debug_lineups = int(min(50, scores.shape[1]))
+    scores_sample = scores[:n_debug_sims_lineups, :n_debug_lineups]
+    lineup_cols = [f"lineup_{i+1}" for i in range(n_debug_lineups)]
+    lineup_scores_df = pd.DataFrame(scores_sample, columns=lineup_cols)
+    lineup_scores_df.insert(0, "sim_idx", np.arange(n_debug_sims_lineups))
+    lineup_scores_df["field_threshold"] = thresholds[:n_debug_sims_lineups]
+    diagnostics.write_df_snapshot(
+        lineup_scores_df,
+        name="lineup_scores",
+        step="top1pct",
+        max_rows=1000,
+    )
+
+    # Per-lineup mean/std plus top 1% rate.
+    mean_scores = scores.mean(axis=0)
+    std_scores = scores.std(axis=0, ddof=0)
+    lineup_summary_df = pd.DataFrame(
+        {
+            "rank": lineups_df.get("rank", pd.Series(range(1, scores.shape[1] + 1))),
+            "mean_score": mean_scores,
+            "std_score": std_scores,
+            "top1_pct_finish_rate": 100.0 * p_top1,
+        }
+    )
+    diagnostics.write_df_snapshot(
+        lineup_summary_df,
+        name="lineup_top1_summary",
+        step="top1pct",
+        max_rows=1000,
+    )
 
     # Augment lineups DataFrame with top 1% probabilities.
     lineups_with_top1 = lineups_df.copy()
