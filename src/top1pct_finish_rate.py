@@ -794,8 +794,8 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--num-sims",
         type=int,
-        default=20_000,
-        help="Number of Monte Carlo simulations to run (default: 20000).",
+        default=100_000,
+        help="Number of Monte Carlo simulations to run (default: 100000).",
     )
     parser.add_argument(
         "--field-var-shrink",
