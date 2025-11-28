@@ -229,3 +229,70 @@ These knobs are intended to produce **realistic relative rankings** of lineups
 by top-1% finish probability (e.g., best lineups a few percent, weakest near
 zero), not perfectly calibrated absolute probabilities.
 
+### Selecting diversified lineups based on top 1% finish rate
+
+Once `outputs/top1pct/` contains a workbook with `Lineups_Top1Pct` (from
+`src.top1pct_finish_rate`), you can select a diversified subset of lineups that:
+
+- Filters out weak lineups with `top1_pct_finish_rate < 1%`.
+- Prefers higher `top1_pct_finish_rate` lineups.
+- Enforces a maximum allowed player overlap between any pair of selected lineups.
+
+From the project root:
+
+```bash
+python -m src.diversify_lineups \
+  --num-lineups 50 \
+  --min-top1-pct 1.0 \
+  --max-overlap 4
+```
+
+This will:
+
+- Load the most recent `.xlsx` in `outputs/top1pct/` and read the
+  `Lineups_Top1Pct` sheet.
+- Keep only lineups with `top1_pct_finish_rate >= min-top1-pct`.
+- Represent each lineup as the set of its six players (CPT + 5 FLEX).
+- Greedily select up to `--num-lineups` lineups in descending
+  `top1_pct_finish_rate` (breaking ties by `lineup_projection` when available),
+  only accepting a lineup if its overlap with every already-selected lineup is
+  at most `--max-overlap` shared players.
+- Write the selected lineups to
+  `outputs/top1pct/top1pct_diversified_{num_lineups}.xlsx` with sheet
+  `Lineups_Diversified`.
+
+Typical choices:
+
+- Use `--min-top1-pct 1.0` to discard lineups with very low modeled upside.
+- Use `--max-overlap` between 3 and 5 to control how aggressively you diversify
+  player combinations across the final portfolio.
+
+### End-to-end pipeline with run_full.sh
+
+You can run the full four-step pipeline (correlation → lineups → top1% →
+diversified portfolio) with the provided helper script:
+
+```bash
+./run_full.sh PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]
+```
+
+Where:
+
+- `FIELD_SIZE` (optional) is the contest size used for the top 1% threshold.
+- `NUM_LINEUPS` (optional) is the number of MILP-optimized lineups to generate.
+- `SALARY_CAP` (optional) is the DK Showdown salary cap (default `50000`).
+- `STACK_MODE` (optional) controls stacking behavior for the optimizer
+  (`none` or `multi`).
+- `STACK_WEIGHTS` (optional) are the multi-stack pattern weights passed through
+  to `src.showdown_optimizer_main`.
+- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select;
+  it defaults to `NUM_LINEUPS` when omitted.
+
+The script will:
+
+1. Build a correlation workbook under `outputs/correlations/`.
+2. Generate a lineup workbook under `outputs/lineups/`.
+3. Estimate top 1% finish probabilities into `outputs/top1pct/`.
+4. Select a diversified subset of `DIVERSIFIED_NUM` lineups based on
+   `top1_pct_finish_rate` and player-overlap constraints.
+
