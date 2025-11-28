@@ -129,6 +129,50 @@ Setting `--chunk-size` to `0` (or a negative value) disables chunking and
 reverts to the original behavior that uses a single model with a growing set of
 no-duplicate constraints.
 
+You can optionally enable **multi-stack mode** to force a mix of team stacks
+across the generated lineups. For example, to generate 1000 lineups split
+equally across 5|1, 4|2, 3|3, 2|4, and 1|5 team stacks:
+
+```bash
+python -m src.showdown_optimizer_main \
+  --sabersim-glob "data/sabersim/NFL_*.csv" \
+  --num-lineups 1000 \
+  --salary-cap 50000 \
+  --chunk-size 50 \
+  --stack-mode multi
+```
+
+In `--stack-mode multi`, the optimizer:
+- Assumes a standard two-team Showdown slate.
+- Splits `--num-lineups` across the five stack patterns
+  (`5|1`, `4|2`, `3|3`, `2|4`, `1|5`) according to configurable weights.
+- Runs the MILP once per pattern with an additional team-level stack constraint.
+- Deduplicates lineups across all runs and writes a **single** Excel workbook
+  as before.
+
+You can customize the relative frequency of each stack pattern using
+`--stack-weights`. For example:
+
+```bash
+python -m src.showdown_optimizer_main \
+  --sabersim-glob "data/sabersim/NFL_*.csv" \
+  --num-lineups 1000 \
+  --salary-cap 50000 \
+  --chunk-size 50 \
+  --stack-mode multi \
+  --stack-weights "5|1=0.4,4|2=0.3,3|3=0.2,2|4=0.1,1|5=0.0"
+```
+
+`--stack-weights` values are normalized to sum to 1. Patterns omitted or set to
+0 receive no lineups (other than potential rounding leftovers, which are
+distributed among patterns with positive weights).
+
+In the resulting `Lineups` sheet, an extra column
+`target_stack_pattern` records which stack configuration/run produced each
+lineup (e.g., `5|1_KC-heavy`, `3|3`, `2|4_SF-heavy`). The existing `stack`
+column still reflects the actual team counts (e.g., `5|1`, `4|2`, `3|3`) and is
+used by downstream tools like `src.top1pct_finish_rate.py`.
+
 
 ### Estimating top 1% finish probabilities for lineups
 
