@@ -14,10 +14,10 @@ This module:
   5. Writes the selected lineups to a new Excel workbook under outputs/top1pct/.
 """
 
+import argparse
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, FrozenSet, List
-
-import argparse
 import pandas as pd
 
 from . import config
@@ -128,6 +128,64 @@ def _greedy_diversified_selection(
     return result_df[cols_original + extras]
 
 
+def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute CPT / FLEX / total exposure across the diversified lineups.
+
+    Exposure is reported as a percentage of selected lineups:
+      - cpt_exposure: 100 * (# of lineups where player is CPT) / N
+      - flex_exposure: 100 * (# of lineups where player appears in any FLEX) / N
+      - total_exposure: cpt_exposure + flex_exposure
+    """
+    if selected_df.empty:
+        return pd.DataFrame(
+            columns=["player", "cpt_exposure", "flex_exposure", "total_exposure"]
+        )
+
+    required_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
+    missing = [c for c in required_cols if c not in selected_df.columns]
+    if missing:
+        raise KeyError(
+            f"Expected lineup columns {missing} to compute exposure in "
+            "Lineups_Diversified sheet."
+        )
+
+    n_lineups = len(selected_df)
+    cpt_counts: Dict[str, int] = defaultdict(int)
+    flex_counts: Dict[str, int] = defaultdict(int)
+
+    for _, row in selected_df.iterrows():
+        # CPT
+        cpt_name = _parse_player_name(row["cpt"])
+        cpt_counts[cpt_name] += 1
+
+        # FLEX slots
+        for col in [f"flex{j}" for j in range(1, 6)]:
+            flex_name = _parse_player_name(row[col])
+            flex_counts[flex_name] += 1
+
+    players = sorted(set(cpt_counts) | set(flex_counts))
+    rows: List[Dict[str, float | str]] = []
+    for name in players:
+        cpt_share = cpt_counts[name] / n_lineups if n_lineups > 0 else 0.0
+        flex_share = flex_counts[name] / n_lineups if n_lineups > 0 else 0.0
+        total_share = cpt_share + flex_share
+        rows.append(
+            {
+                "player": name,
+                "cpt_exposure": 100.0 * cpt_share,
+                "flex_exposure": 100.0 * flex_share,
+                "total_exposure": 100.0 * total_share,
+            }
+        )
+
+    exposure_df = pd.DataFrame(rows)
+    exposure_df.sort_values(
+        by=["total_exposure", "player"], ascending=[False, True], inplace=True
+    )
+    return exposure_df
+
+
 def run(
     num_lineups: int,
     *,
@@ -166,6 +224,8 @@ def run(
         min_top1_pct=min_top1_pct,
     )
 
+    exposure_df = _compute_exposure(selected_df)
+
     outputs_dir = config.OUTPUTS_DIR / "top1pct"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -178,6 +238,11 @@ def run(
         selected_df.to_excel(
             writer,
             sheet_name="Lineups_Diversified",
+            index=False,
+        )
+        exposure_df.to_excel(
+            writer,
+            sheet_name="Exposure",
             index=False,
         )
 
