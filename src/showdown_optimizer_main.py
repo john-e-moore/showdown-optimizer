@@ -28,6 +28,9 @@ from .lineup_optimizer import (
 )
 
 
+STACK_PATTERNS: tuple[str, ...] = ("5|1", "4|2", "3|3", "2|4", "1|5")
+
+
 def _format_lineup(lineup: Lineup, idx: int) -> str:
     lines: list[str] = []
     header = f"Lineup {idx + 1}: salary={lineup.salary()} proj={lineup.projection():.2f}"
@@ -83,6 +86,27 @@ def main() -> None:
             "Number of lineups to solve per MILP chunk when generating many "
             "lineups. Set to 0 or a negative value to disable chunking and "
             "use a single growing model (legacy behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--stack-mode",
+        type=str,
+        choices=["none", "multi"],
+        default="none",
+        help=(
+            "Stacking mode: 'none' (default) runs a single optimization pass. "
+            "'multi' splits --num-lineups across 5|1, 4|2, 3|3, 2|4, 1|5 "
+            "team stack patterns and runs one pass per pattern."
+        ),
+    )
+    parser.add_argument(
+        "--stack-weights",
+        type=str,
+        default=None,
+        help=(
+            "Optional weights for multi-stack mode, e.g. "
+            "'5|1=0.3,4|2=0.25,3|3=0.2,2|4=0.15,1|5=0.1'. "
+            "If omitted in multi-stack mode, all patterns are weighted equally."
         ),
     )
 
