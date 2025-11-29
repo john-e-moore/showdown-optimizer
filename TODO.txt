@@ -1,0 +1,3 @@
+- Read DKEntries, curl contest and player info, and output filled DKEntries.
+- Data storage on S3
+- Extend same method to NBA

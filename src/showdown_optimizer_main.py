@@ -240,6 +240,9 @@ def main() -> None:
     # Load players for ownership/opponent metadata.
     player_pool = load_players_from_sabersim(csv_path)
     players_by_id = {p.player_id: p for p in player_pool.players}
+    # All distinct teams present in the slate (used for both stack modes and
+    # for building exposure/ownership opponent mappings later).
+    teams = sorted({p.team for p in player_pool.players})
 
     # Prepare any custom DFS constraints from the configuration module.
     constraint_builders = build_custom_constraints()
@@ -260,7 +263,6 @@ def main() -> None:
         stack_pattern_labels = ["none"] * len(lineups)
     else:
         # Multi-stack mode uses team-level stack constraints across the two teams.
-        teams = sorted({p.team for p in player_pool.players})
         if len(teams) != 2:
             raise ValueError(
                 "Multi-stack mode requires exactly two distinct teams in the slate."

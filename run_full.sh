@@ -42,11 +42,11 @@ fi
 
 SABERSIM_CSV="$1"
 FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-1000}"
+NUM_LINEUPS="${3:-100}"
 SALARY_CAP="${4:-50000}"
-STACK_MODE="${5:-multi}"
+STACK_MODE="${5:-none}"
 STACK_WEIGHTS="${6-}"
-DIVERSIFIED_NUM="${7:-$NUM_LINEUPS}"
+DIVERSIFIED_NUM="${7:-17}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
   echo "Error: Sabersim CSV not found at '${SABERSIM_CSV}'" >&2
