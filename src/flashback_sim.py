@@ -707,7 +707,7 @@ def _build_player_summary(
 def run(
     contest_csv: str | None = None,
     sabersim_csv: str | None = None,
-    num_sims: int = 20_000,
+    num_sims: int = 100_000,
     random_seed: int | None = None,
 ) -> Path:
     """
@@ -924,7 +924,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--num-sims",
         type=int,
-        default=20_000,
+        default=100_000,
         help="Number of Monte Carlo simulations to run (default: 20000).",
     )
     parser.add_argument(

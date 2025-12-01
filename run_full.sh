@@ -46,7 +46,7 @@ NUM_LINEUPS="${3:-1000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
-DIVERSIFIED_NUM="${7:-17}"
+DIVERSIFIED_NUM="${7:-15}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
   echo "Error: Sabersim CSV not found at '${SABERSIM_CSV}'" >&2
