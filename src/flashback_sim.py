@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
-
+from collections import Counter
 import numpy as np
 import pandas as pd
 
@@ -433,12 +433,151 @@ def _compute_lineup_finish_rates(
     return top1, top5, top20, avg_points
 
 
+def _build_sabersim_ownership_and_salary(
+    sabersim_raw_df: pd.DataFrame,
+) -> Dict[Tuple[str, str], Dict[str, float]]:
+    """
+    Build CPT/FLEX ownership and salary mapping from the raw Sabersim CSV.
+
+    For each (Name, Team) pair:
+      - Sort rows by DK projection descending.
+      - Treat the highest-projection row as the CPT-equivalent row.
+      - If a second row exists, treat it as the FLEX-equivalent row.
+
+    Ownership values are kept in the same units as the Sabersim 'My Own'
+    column (e.g., 0.67 meaning 0.67%).
+    """
+    name_col = build_corr_matrix_from_projections.SABERSIM_NAME_COL
+    team_col = build_corr_matrix_from_projections.SABERSIM_TEAM_COL
+    salary_col = build_corr_matrix_from_projections.SABERSIM_SALARY_COL
+    proj_col = build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL
+
+    required_cols = {name_col, team_col, salary_col, proj_col, "My Own"}
+    missing = required_cols.difference(sabersim_raw_df.columns)
+    if missing:
+        raise KeyError(
+            "Sabersim CSV missing required columns for ownership/salary "
+            f"computation {sorted(missing)}."
+        )
+
+    df = sabersim_raw_df.copy()
+    df[name_col] = df[name_col].astype(str)
+    df[team_col] = df[team_col].astype(str)
+    df[proj_col] = df[proj_col].astype(float)
+    df["My Own"] = df["My Own"].astype(float)
+    df[salary_col] = df[salary_col].astype(float)
+
+    mapping: Dict[Tuple[str, str], Dict[str, float]] = {}
+
+    grouped = df.groupby([name_col, team_col])
+    for (name, team), g in grouped:
+        if g.empty:
+            continue
+        g_sorted = g.sort_values(by=proj_col, ascending=False)
+        cpt_row = g_sorted.iloc[0]
+        cpt_own = float(cpt_row["My Own"])
+        cpt_salary = float(cpt_row[salary_col])
+
+        flex_own = 0.0
+        flex_salary = 0.0
+        if len(g_sorted) > 1:
+            flex_row = g_sorted.iloc[1]
+            flex_own = float(flex_row["My Own"])
+            flex_salary = float(flex_row[salary_col])
+
+        mapping[(str(name), str(team))] = {
+            "cpt_own_pct": cpt_own,
+            "flex_own_pct": flex_own,
+            "cpt_salary": cpt_salary,
+            "flex_salary": flex_salary,
+        }
+
+    return mapping
+
+
+def _build_projected_ownership_by_player(
+    ownership_salary_by_name_team: Dict[Tuple[str, str], Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    """
+    Aggregate projected CPT/FLEX ownership by player name across teams.
+    """
+    projected: Dict[str, Dict[str, float]] = {}
+    for (name, _team), info in ownership_salary_by_name_team.items():
+        record = projected.setdefault(
+            name, {"cpt_proj_own": 0.0, "flex_proj_own": 0.0}
+        )
+        record["cpt_proj_own"] += float(info.get("cpt_own_pct", 0.0))
+        record["flex_proj_own"] += float(info.get("flex_own_pct", 0.0))
+    return projected
+
+
+def _add_ownership_columns_to_simulation(
+    simulation_df: pd.DataFrame,
+    ownership_salary_by_name_team: Dict[Tuple[str, str], Dict[str, float]],
+    name_to_team: Dict[str, str],
+) -> pd.DataFrame:
+    """
+    Add Sum Ownership and Salary-weighted Ownership columns to simulation_df.
+
+    Sum Ownership:
+        Sum of Sabersim CPT/FLEX ownership percentages for the six players.
+
+    Salary-weighted Ownership:
+        Sum over players of (salary * ownership_pct), scaled by 1,000 to keep
+        values human-readable.
+    """
+    if simulation_df.empty:
+        result = simulation_df.copy()
+        result["Sum Ownership"] = pd.Series(dtype=float)
+        result["Salary-weighted Ownership"] = pd.Series(dtype=float)
+        return result
+
+    sum_own_values: List[float] = []
+    swo_values: List[float] = []
+
+    for _, row in simulation_df.iterrows():
+        total_own = 0.0
+        swo_raw = 0.0
+
+        # CPT slot.
+        cpt_name = str(row["CPT"])
+        cpt_team = name_to_team.get(cpt_name, "")
+        cpt_info = ownership_salary_by_name_team.get((cpt_name, cpt_team))
+        if cpt_info is not None:
+            cpt_own = float(cpt_info.get("cpt_own_pct", 0.0))
+            cpt_salary = float(cpt_info.get("cpt_salary", 0.0))
+            total_own += cpt_own
+            swo_raw += cpt_salary * cpt_own
+
+        # FLEX slots.
+        for col in ["Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]:
+            flex_name = str(row[col])
+            flex_team = name_to_team.get(flex_name, "")
+            flex_info = ownership_salary_by_name_team.get((flex_name, flex_team))
+            if flex_info is None:
+                continue
+            flex_own = float(flex_info.get("flex_own_pct", 0.0))
+            flex_salary = float(flex_info.get("flex_salary", 0.0))
+            total_own += flex_own
+            swo_raw += flex_salary * flex_own
+
+        sum_own_values.append(total_own)
+        # Scale by 1,000 for readability.
+        swo_values.append(swo_raw / 1000.0)
+
+    result = simulation_df.copy()
+    result["Sum Ownership"] = sum_own_values
+    result["Salary-weighted Ownership"] = swo_values
+    return result
+
+
 def _build_entrant_summary(
     simulation_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Build entrant-level summary statistics from per-lineup simulation results.
     """
+    # Mean performance metrics by entrant.
     grouped = simulation_df.groupby("Entrant", as_index=False)
     summary = grouped.agg(
         {
@@ -457,11 +596,23 @@ def _build_entrant_summary(
         },
         inplace=True,
     )
+
+    # Entry counts per entrant.
+    entries_df = (
+        simulation_df.groupby("Entrant", as_index=False)
+        .agg(Entries=("Entrant", "count"))
+    )
+
+    summary = entries_df.merge(summary, on="Entrant", how="left")
+    summary = summary[
+        ["Entrant", "Entries", "Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"]
+    ]
     return summary
 
 
 def _build_player_summary(
     simulation_df: pd.DataFrame,
+    projected_ownership_by_player: Dict[str, Dict[str, float]],
 ) -> pd.DataFrame:
     """
     Build player-level summary statistics from per-lineup simulation results.
@@ -475,7 +626,9 @@ def _build_player_summary(
             columns=[
                 "Player",
                 "CPT draft %",
+                "CPT proj ownership",
                 "FLEX draft %",
+                "FLEX proj ownership",
                 "CPT top 1% rate",
                 "FLEX top 1% rate",
                 "CPT top 20% rate",
@@ -523,17 +676,24 @@ def _build_player_summary(
         flex_draft = float(flex_counts.get(player, 0)) / float(num_lineups)
 
         # Role-specific performance metrics.
-        sub_cpt = long_df[(long_df["Player"] == player) and (long_df["role"] == "CPT")]
-        sub_flex = long_df[(long_df["Player"] == player) and (long_df["role"] == "FLEX")]
+        mask_player = long_df["Player"] == player
+        sub_cpt = long_df[mask_player & (long_df["role"] == "CPT")]
+        sub_flex = long_df[mask_player & (long_df["role"] == "FLEX")]
 
         def _safe_mean(series: pd.Series) -> float:
             return float(series.mean()) if not series.empty else 0.0
+
+        proj = projected_ownership_by_player.get(
+            player, {"cpt_proj_own": 0.0, "flex_proj_own": 0.0}
+        )
 
         rows.append(
             {
                 "Player": player,
                 "CPT draft %": cpt_draft,
+                "CPT proj ownership": float(proj.get("cpt_proj_own", 0.0)),
                 "FLEX draft %": flex_draft,
+                "FLEX proj ownership": float(proj.get("flex_proj_own", 0.0)),
                 "CPT top 1% rate": _safe_mean(sub_cpt["Top 1%"]),
                 "FLEX top 1% rate": _safe_mean(sub_flex["Top 1%"]),
                 "CPT top 20% rate": _safe_mean(sub_cpt["Top 20%"]),
@@ -576,6 +736,9 @@ def run(
     )
 
     # Load Sabersim projections and build correlation matrix via simulation.
+    # sabersim_raw_df preserves the full CSV for projections/ownership sheets,
+    # while sabersim_df is FLEX-only and used for correlations.
+    sabersim_raw_df = pd.read_csv(sabersim_path)
     sabersim_df = build_corr_matrix_from_projections.load_sabersim_projections(
         sabersim_path
     )
@@ -628,9 +791,92 @@ def run(
     simulation_df["Top 20%"] = top20
     simulation_df["Avg Points"] = avg_points
 
+    # ------------------------------------------------------------------
+    # Compute stack label per lineup using Sabersim team info.
+    # ------------------------------------------------------------------
+    required_cols = {
+        build_corr_matrix_from_projections.SABERSIM_NAME_COL,
+        build_corr_matrix_from_projections.SABERSIM_TEAM_COL,
+    }
+    missing = required_cols.difference(sabersim_df.columns)
+    if missing:
+        raise KeyError(
+            "Sabersim projections missing required columns for stack computation "
+            f"{sorted(missing)}."
+        )
+
+    sabersim_names = sabersim_df[
+        build_corr_matrix_from_projections.SABERSIM_NAME_COL
+    ].astype(str)
+    sabersim_teams = sabersim_df[
+        build_corr_matrix_from_projections.SABERSIM_TEAM_COL
+    ].astype(str)
+    name_to_team: Dict[str, str] = (
+        pd.DataFrame({"Name": sabersim_names, "Team": sabersim_teams})
+        .drop_duplicates(subset=["Name"])
+        .set_index("Name")["Team"]
+        .to_dict()
+    )
+
+    stack_labels: List[str] = []
+    for _, row in simulation_df.iterrows():
+        player_names = [
+            str(row["CPT"]),
+            str(row["Flex1"]),
+            str(row["Flex2"]),
+            str(row["Flex3"]),
+            str(row["Flex4"]),
+            str(row["Flex5"]),
+        ]
+        teams: List[str] = []
+        for name in player_names:
+            team = name_to_team.get(name)
+            if team:
+                teams.append(team)
+
+        if not teams:
+            stack_labels.append("")
+            continue
+
+        team_counts = Counter(teams)
+        counts_sorted = sorted(team_counts.values(), reverse=True)
+        pattern = "|".join(str(c) for c in counts_sorted)
+
+        # Determine heavy team if there is a unique max count.
+        top_team, top_count = max(team_counts.items(), key=lambda kv: kv[1])
+        if list(team_counts.values()).count(top_count) == 1:
+            label = f"{pattern} {top_team}-heavy"
+        else:
+            label = pattern
+        stack_labels.append(label)
+
+    # Insert 'Stack' as the 3rd column (between EntryName and CPT).
+    cols = list(simulation_df.columns)
+    if "EntryName" in cols:
+        insert_at = cols.index("EntryName") + 1
+        simulation_df.insert(insert_at, "Stack", stack_labels)
+    else:
+        # Fallback: prepend Stack if EntryName is missing for some reason.
+        simulation_df.insert(0, "Stack", stack_labels)
+
+    # Ownership-driven lineup metrics and summaries.
+    ownership_salary_by_name_team = _build_sabersim_ownership_and_salary(
+        sabersim_raw_df
+    )
+    projected_ownership_by_player = _build_projected_ownership_by_player(
+        ownership_salary_by_name_team
+    )
+    simulation_df = _add_ownership_columns_to_simulation(
+        simulation_df=simulation_df,
+        ownership_salary_by_name_team=ownership_salary_by_name_team,
+        name_to_team=name_to_team,
+    )
+
     # Entrant and player summaries.
     entrant_summary_df = _build_entrant_summary(simulation_df)
-    player_summary_df = _build_player_summary(simulation_df)
+    player_summary_df = _build_player_summary(
+        simulation_df, projected_ownership_by_player
+    )
 
     # Output path.
     flashback_dir = config.OUTPUTS_DIR / FLASHBACK_SUBDIR
@@ -640,6 +886,7 @@ def run(
 
     print(f"Writing flashback results to {output_path}...")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+        sabersim_raw_df.to_excel(writer, sheet_name="Projections", index=False)
         standings_df.to_excel(writer, sheet_name="Standings", index=False)
         simulation_df.to_excel(writer, sheet_name="Simulation", index=False)
         entrant_summary_df.to_excel(writer, sheet_name="Entrant summary", index=False)

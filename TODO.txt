@@ -1,4 +1,10 @@
-- Post-contest sim; see if my stuff matches Sabersim's
-- Read DKEntries, curl contest and player info, and output filled DKEntries.
-- Data storage on S3
+x Post-contest sim; see if my stuff matches Sabersim's
+ - Add 'Projections' tab (make it the first tab) with the original sabersim projections
+ - Add 'Sum Ownership' and 'Salary-weighted Ownership' to 'Simulation' tab
+ - Add 'Entries' column into 2nd column of 'Entrant summary' tab - the number of entries that entrant put into the contest
+ - In 'Player summary' tab, add 'CPT proj ownership' and 'FLEX proj ownership' next to 'CPT draft %' and 'FLEX draft %'; these are the projected ownerships from the sabersim projections.
+- Read DKEntries, curl contest, draftables, and payout info, and output filled DKEntries.
 - Extend same method to NBA
+- Data storage on S3
+- Does DK API have endpoints for actual contest payouts? Seems like contests.json does not have it?
+- Get higher sabersim plan for non-flagship ownership in showdown
