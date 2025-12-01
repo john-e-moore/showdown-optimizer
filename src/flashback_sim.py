@@ -925,7 +925,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         "--num-sims",
         type=int,
         default=100_000,
-        help="Number of Monte Carlo simulations to run (default: 20000).",
+        help="Number of Monte Carlo simulations to run (default: 100000).",
     )
     parser.add_argument(
         "--random-seed",
