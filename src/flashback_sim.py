@@ -28,7 +28,7 @@ or with explicit inputs:
     python -m src.flashback_sim \\
         --contest-csv data/contests/my_contest.csv \\
         --sabersim-csv data/sabersim/my_slate.csv \\
-        --num-sims 20000
+        --num-sims 100000
 """
 
 import argparse
@@ -577,16 +577,50 @@ def _compute_sim_roi(
     else:
         payouts_full = payouts[:num_lineups]
 
-    # argsort in descending order per simulation to get rank positions.
-    order = np.argsort(-scores, axis=1)  # shape (num_sims, num_lineups)
+    # Allocate payout matrix with DK-style tie splitting applied per simulation.
+    payout_matrix = np.zeros_like(scores, dtype=float)
 
-    # Invert permutations to get rank indices per lineup.
-    ranks = np.empty_like(order)
-    row_indices = np.arange(num_sims)[:, None]
-    ranks[row_indices, order] = np.arange(num_lineups)[None, :]
+    for sim_idx in range(num_sims):
+        row_scores = scores[sim_idx]
+        # Order lineups by score descending.
+        order = np.argsort(-row_scores)
+        sorted_scores = row_scores[order]
 
-    # Map rank indices (0-based) to payouts_full.
-    payout_matrix = payouts_full[ranks]  # shape (num_sims, num_lineups)
+        payouts_this_sim = np.zeros(num_lineups, dtype=float)
+
+        start = 0
+        while start < num_lineups:
+            # Find end of tie group [start, end) in sorted order.
+            end = start + 1
+            while end < num_lineups and sorted_scores[end] == sorted_scores[start]:
+                end += 1
+
+            # Rank indices for this tie group are start..end-1 (0-based).
+            lo = start
+            hi = end
+            group_len = hi - lo
+
+            if group_len <= 0:
+                start = end
+                continue
+
+            if lo >= payouts_full.size:
+                avg_payout = 0.0
+            else:
+                slice_hi = min(hi, payouts_full.size)
+                # Sum payouts for the portion of the tie group that has defined
+                # payouts; positions beyond slice_hi are treated as zero.
+                total = float(payouts_full[lo:slice_hi].sum()) if slice_hi > lo else 0.0
+                avg_payout = total / float(group_len)
+
+            # Assign the averaged payout to all entries in this tie group.
+            tied_indices = order[lo:hi]
+            payouts_this_sim[tied_indices] = avg_payout
+
+            start = end
+
+        payout_matrix[sim_idx] = payouts_this_sim
+
     roi_matrix = (payout_matrix - entry_fee) / entry_fee
 
     sim_roi = roi_matrix.mean(axis=0)
