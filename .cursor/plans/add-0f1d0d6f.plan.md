@@ -1,140 +1,76 @@
-<!-- 0f1d0d6f-c004-4184-bca2-9461a3c33a39 df0eeedf-93a2-4987-9b19-6fc3519f117f -->
-# Add NBA Showdown support alongside NFL
+<!-- 0f1d0d6f-c004-4184-bca2-9461a3c33a39 3bdc23c9-cf79-43fc-bddd-58003003be59 -->
+# NBA box-score–based correlation plan
 
-## High-level goals
+### Goal
 
-- **Keep the existing NFL pipeline working as-is**, while adding NBA as a parallel sport.
-- **Refactor the codebase into shared vs sport-specific modules**, minimizing duplication.
-- **First milestone**: support building an NBA correlation matrix from a Sabersim NBA projections CSV under `data/nba/sabersim/`.
-- **Later milestones**: extend the NBA side to cover lineup optimization, top 1% simulation, diversification, DKEntries filling, and flashback analysis.
+Make the NBA correlation pipeline mirror the NFL one: simulate NBA **box-score stats** from Sabersim projections, convert them to **DK fantasy points**, then compute empirical **DK-point correlations** between all players.
 
-## Step 1: Introduce sport-aware directory layout
+### Step 1: Analyze existing NFL flow and NBA inputs
 
-- **Data directories**
-- Create `data/nfl/` and `data/nba/` (with subdirs as needed, e.g. `data/nfl/sabersim/`, `data/nba/sabersim/`, `data/nfl/contests/`, etc.).
-- Move existing NFL data from current locations (e.g. `data/sabersim/`, `data/contests/`, `data/nfl_raw/`, `data/dkentries/`) into `data/nfl/...` and update any absolute/relative paths in the code and README.
-- **Outputs and diagnostics**
-- Create `outputs/nfl/` and `outputs/nba/` with sport-specific subfolders mirroring current usage, e.g.:
-- `outputs/nfl/correlations/`, `outputs/nfl/lineups/`, `outputs/nfl/top1pct/`, `outputs/nfl/flashback/`, `outputs/nfl/dkentries/`.
-- `outputs/nba/correlations/`, `outputs/nba/lineups/`, `outputs/nba/top1pct/`, `outputs/nba/flashback/`, `outputs/nba/dkentries/`.
-- If you use a `diagnostics/` tree, mirror this convention with `diagnostics/nfl/` and `diagnostics/nba/`.
-- **Keep the top-level stable**
-- Preserve the existing top-level folders (`data/`, `outputs/`, `diagnostics/`, `src/`, `run_full.sh`, etc.), only introducing `nfl/` and `nba/` *inside* those domain folders.
+- **Review NFL correlation stack**:
+- `src/build_corr_matrix_from_projections.py` (Sabersim → canonical features for ML/historical, may reuse ideas but not ML part).
+- `src/simulation_corr.py` (stat-level simulator + DK scoring for NFL).
+- `src/main.py` (NFL correlation CLI wiring).
+- **Catalog NBA Sabersim columns** from the actual CSV (already seen: `PTS`, `Min`, `RB`, `AST`, `STL`, `BLK`, `TO`, 2PT/3PT-related columns, plus percentile/`dk_points` fields) and decide which will drive the NBA stat model.
 
-## Step 2: Restructure `src/` into shared and sport packages
+### Step 2: Design NBA stat and scoring model
 
-- **Create shared and sport-specific packages**
-- Add `src/shared/` for completely sport-agnostic code.
-- Add `src/nfl/` and `src/nba/` for sport-specific logic, configs, and CLIs.
-- **Identify and move shared components** (mostly by inspecting `src/build_corr_matrix_from_projections.py` and related modules):
-- Simulation engine (Dirichlet / multinomial sampling, Monte Carlo loops, random seeding helpers).
-- Generic correlation matrix computation (converting simulated samples into a correlation matrix and DataFrame/Excel outputs).
-- Generic utility functions (e.g., date/time helpers, logging, common validation, common CLI argument parsing) that don’t intrinsically depend on NFL.
-- Excel/IO helpers used by multiple scripts (writing workbooks, auto-selecting latest files by pattern).
-- **Leave NFL wiring in an NFL-specific layer**
-- Create `src/nfl/corr_pipeline.py` (or similar) that:
-- Parses NFL Sabersim projections.
-- Calls the shared simulation/correlation functions with NFL-specific configuration (positions, team IDs, stat model knobs, path conventions).
-- Writes to `outputs/nfl/correlations/...` by default.
-- Update any NFL entrypoint modules (e.g. `src/main.py` if it is NFL-specific) to live under `src/nfl/` or to clearly delegate to the new `src/nfl/` pipeline functions.
+- **Define a minimal NBA stat schema** for simulation (per player, per game):
+- Core scoring stats: `pts`, `reb`, `ast`, `stl`, `blk`, `tov`, and optionally `fg3m`.
+- Pull per-player *expected* values from Sabersim columns (`PTS`, `RB`, `AST`, etc.).
+- **Specify DK scoring function** for NBA Showdown (simplified first pass):
+- Implement a deterministic function `compute_dk_points_nba(pts, reb, ast, stl, blk, tov, fg3m)` in a new NBA module.
+- Optionally include standard DK bonuses (double-double, triple-double, 3PM bonus) as a second iteration once the core is working.
+- **Choose simulation family**:
+- For a first version, model each stat as an independent positive random variable per player (e.g., Poisson or Gamma with mean equal to the Sabersim expectation), ignoring intra-team stat sharing.
+- Document that this is less structured than NFL but still produces a meaningful joint DK distribution once correlated via the covariance implied by the Sabersim-derived stats.
 
-## Step 3: Introduce shared + sport-specific configuration
+### Step 3: Implement NBA stat simulator
 
-- **Shared base config**
-- Add something like `src/shared/config_base.py` with sport-agnostic settings and helpers:
-- Common simulation parameters (e.g. `SIM_N_GAMES`, `SIM_RANDOM_SEED` defaults).
-- Base directory helpers (e.g. functions that build paths under `data/{sport}/...` and `outputs/{sport}/...`).
-- Any generic constants used by both sports.
-- **NFL config module**
-- Add/rename `src/nfl/config.py` to focus on NFL-specific parameters:
-- NFL default Sabersim glob/path (now under `data/nfl/sabersim/`).
-- NFL stat categories and their Dirichlet `k` parameters.
-- NFL positional set and role filters (CPT/FLEX, QB/RB/WR/TE/K/DEF, etc.).
-- Default NFL output paths (e.g. `outputs/nfl/correlations/showdown_corr_matrix.xlsx`).
-- Update existing NFL scripts to import from this module and from `shared.config_base` instead of the old monolithic `config.py`.
-- **NBA config module**
-- Create `src/nba/config.py` that mirrors the NFL config but with NBA specifics:
-- NBA default Sabersim glob/path (under `data/nba/sabersim/`).
-- NBA stat categories and any initial modeling assumptions (you can start with a simple model and refine later).
-- NBA positional set/filters (e.g. G/F/C, roster constraints for Showdown CPT/FLEX if they differ from NFL).
-- NBA default output paths (e.g. `outputs/nba/correlations/showdown_corr_matrix.xlsx`).
+- **Create `src/nba/stat_sim.py`** (or similar) that:
+- Defines a function `simulate_nba_stats_from_projections(df, n_sims, rng)` that:
+- Takes FLEX-only Sabersim NBA projections (`Name`, `Team`, `PTS`, `RB`, `AST`, `STL`, `BLK`, `TO`, optionally `3PT`/`2PT` split).
+- For each player and each stat, samples `n_sims` draws from a parametric distribution (e.g., Poisson with lambda equal to projected stat, or a scaled Gamma/Normal with truncation at 0).
+- Returns arrays of shape `(n_players, n_sims)` for each stat.
+- **Add an NBA DK scoring helper** in the same module:
+- `simulate_nba_dk_points(df, n_sims, rng)` that:
+- Calls the stat simulator.
+- Applies the DK scoring function to get a DK-points matrix `(n_players, n_sims)`.
 
-## Step 4: Implement NBA Sabersim parsing and data model
+### Step 4: Build NBA correlation matrix from simulated DK points
 
-- **Create an NBA Sabersim parser**
-- Add `src/nba/sabersim_parser.py` (or similarly named module) that:
-- Reads an NBA Sabersim Showdown projections CSV (from `data/nba/sabersim/`).
-- Normalizes column names and types into a sport-agnostic internal schema expected by the shared simulation (e.g. player ID, name, team, opponent, role (CPT/FLEX), projected fantasy points, salary, position).
-- Handles any NBA-specific quirks (e.g. multi-position eligibility, different column naming conventions).
-- **Define an internal NBA player model**
-- Create NBA-specific helper functions (in `src/nba/model_utils.py`, for example) that:
-- Map raw Sabersim rows into an internal `Player` dataclass or similar structure used by the shared engine.
-- Determine CPT vs FLEX eligibility and any position-based filters for correlation (e.g. which positions to include).
+- **Create `src/nba/corr_from_sim.py`** (or fold into `stat_sim.py`) that:
+- Takes the DK-points matrix `(n_players, n_sims)` and player names.
+- Drops players with zero variance across sims.
+- Computes `np.corrcoef` across players, clamps NaNs/inf, and fills diagonal with 1.0.
+- Returns a `pd.DataFrame` indexed/columned by player name.
+- **Wire this into the NBA pipeline** by updating `src/nba/simulation_corr.py` to:
+- Call the new NBA stat+scoring simulator instead of the generic DK-pool Dirichlet engine.
+- Keep the same public API (`simulate_corr_matrix_from_projections(sabersim_df, n_sims, random_seed)`), so `src/nba/main.py` doesn’t change.
 
-## Step 5: Wire NBA into the shared correlation engine
+### Step 5: Validate NBA correlations and compare to current approach
 
-- **Create an NBA correlation entrypoint module**
-- Add `src/nba/build_corr_matrix.py` (or `src/nba/main.py`) that:
-- Parses command-line args (Sabersim path, number of simulations, output path, RNG seed, etc.) mirroring the existing NFL CLI interface.
-- Uses `src/nba/config.py` defaults when arguments are omitted.
-- Calls the NBA Sabersim parser to produce normalized player inputs.
-- Invokes shared simulation/correlation functions from `src/shared/`.
-- Writes the resulting Excel output under `outputs/nba/correlations/`.
-- **Align CLI behavior between NFL and NBA**
-- Ensure the NBA entrypoint accepts essentially the same flags and options as the NFL correlation script (so your workflow is parallel, just with a different sport module and default paths).
+- **Run the NBA correlation CLI** on the OKC–GSW slate and inspect:
+- Distribution of simulated DK means vs `My Proj` per player.
+- Sanity of correlation signs/magnitudes (e.g., high-usage teammates slightly positively correlated; bench players with low mins closer to independent or weak correlations).
+- **Compare against the old generic DK-only model**:
+- For a few players, compare row/column of the old vs new `Correlation_Matrix` to understand the impact of stat modeling.
+- Ensure there are no pathological values (NaN, inf, all zeros) and that the Excel output structure matches NFL (same sheet names, etc.).
 
-## Step 6: Verify NBA correlation pipeline end-to-end
+### Step 6: Optional refinements and documentation
 
-- **Manual test with a real NBA Sabersim CSV**
-- After you upload an NBA projections CSV to `data/nba/sabersim/`, run the NBA correlation entrypoint (e.g. `python -m src.nba.build_corr_matrix ...`).
-- Confirm that:
-- The script reads the NBA CSV successfully and recognizes players/columns.
-- The Monte Carlo simulation runs without errors at a modest `SIM_N_GAMES` (e.g. 1,000–5,000) to start.
-- An Excel file appears under `outputs/nba/correlations/` with the expected sheets and structure (mirroring the NFL version but with NBA players).
-- **Sanity-check outputs**
-- Spot-check a few players/teams to ensure projections and correlations look reasonable (no obviously broken scaling, NaNs, or empty matrices).
-- Fix any sport-specific assumptions that don’t translate well from NFL.
-
-## Step 7: Extend NBA to the rest of the pipeline (future milestones)
-
-- **Lineup optimizer for NBA**
-- Extract shared MILP/optimizer code into `src/shared/optimizer_core.py`.
-- Create `src/nfl/showdown_optimizer_main.py` and `src/nba/showdown_optimizer_main.py` that each:
-- Parse their sport’s Sabersim projections.
-- Apply sport-specific roster rules (NBA Showdown lineup constraints, multi-position eligibility rules, etc.).
-- Use shared optimizer core to generate lineups to `outputs/{sport}/lineups/`.
-- **Top 1% finish simulation & diversification for NBA**
-- Move sport-agnostic pieces of `src.top1pct_finish_rate` and `src.diversify_lineups` into `src/shared/`.
-- Add NBA-aware wrappers (or extend existing CLIs with a `--sport nba` flag) to:
-- Use the correct correlation/lineups workbooks under `outputs/nba/...`.
-- Write NBA results to `outputs/nba/top1pct/` and `outputs/nba/top1pct_diversified_*.xlsx`.
-- **DKEntries filling and flashback analysis for NBA**
-- Mirror NFL’s DKEntries utilities in an NBA context (either via shared code with a sport flag or separate thin NBA wrappers).
-- Add NBA-oriented flashback scripts that:
-- Read NBA contest CSVs from `data/nba/contests/`.
-- Use NBA correlations and projections to simulate outcomes and write `outputs/nba/flashback/` workbooks.
-
-## Step 8: CLI scripts and documentation
-
-- **Shell entrypoints**
-- Keep the existing `run_full.sh` semantics for NFL.
-- Add a parallel `run_full_nba.sh` (or a unified script that accepts a `SPORT` argument) that:
-- Points to `data/nba/sabersim/...` by default.
-- Calls `src.nba.build_corr_matrix`, `src.nba.showdown_optimizer_main`, `src.nba.top1pct_finish_rate`, `src.nba.diversify_lineups`, and NBA DKEntries filler when those steps exist.
-- **Update `README.md`**
-- Document the new directory structure (`data/nfl/...` vs `data/nba/...`, `outputs/nfl/...` vs `outputs/nba/...`).
-- Add a short “NBA Showdown” section mirroring the NFL instructions:
-- Where to put NBA Sabersim CSVs.
-- How to run the NBA correlation-only pipeline initially (and later the full NBA pipeline once implemented).
-- Any NBA-specific caveats (e.g., differences in positions or stacking behavior).
+- **Refine NBA stat model** based on behavior:
+- Introduce simple team-level or pace-based coupling (e.g., correlate teammates’ minutes or points using shared game-level variance) if necessary.
+- Add DK bonuses (3PM, double-double, triple-double) if they materially change tail behavior.
+- **Document the NBA pipeline behavior**:
+- Update `README.md` with a short “NBA correlations” section explaining that NBA correlations are now built from simulated box-score stats and DK scoring, mirroring the NFL process.
+- Briefly note any simplifications vs NFL (e.g., fewer team-level constraints in the stat simulator at first).
 
 ### To-dos
 
-- [ ] Restructure data and outputs into sport-aware folders (data/nfl, data/nba, outputs/nfl, outputs/nba) and update any hard-coded paths.
-- [ ] Create src/shared package and move sport-agnostic simulation, correlation, IO, and utility code into it.
-- [ ] Create src/nfl package with NFL-specific config and correlation pipeline wrapper that delegates to shared code.
-- [ ] Create src/nba config and Sabersim parser mirroring the NFL structure but with NBA-specific assumptions.
-- [ ] Implement an NBA correlation entrypoint module that uses the shared engine and NBA parser to write outputs/nba/correlations workbooks.
-- [ ] Run the NBA correlation pipeline on a real Sabersim NBA CSV and verify outputs for plausibility.
-- [ ] Refactor optimizer, top1% simulation, diversification, DKEntries filling, and flashback code into shared + per-sport layers for both NFL and NBA.
-- [ ] Add sport-aware shell entrypoints (e.g., run_full_nfl.sh, run_full_nba.sh) and update README with NFL vs NBA usage.
+- [ ] Review NFL correlation implementation and catalog which NBA Sabersim columns to use for stat simulation.
+- [ ] Define the NBA stat schema (PTS, RB, AST, STL, BLK, TOV, FG3M, etc.) and a DK scoring function for Showdown.
+- [ ] Implement nba/stat_sim.py to sample per-player stat lines from Sabersim projections and convert them to DK points.
+- [ ] Implement an NBA-specific correlation builder that computes corr(DK_i, DK_j) from simulated DK-point matrices and wire it into src/nba/simulation_corr.py.
+- [ ] Run the updated NBA pipeline on the OKC–GSW slate, inspect projections vs simulated means and spot-check correlations for sanity.
+- [ ] Optionally refine the NBA stat model (bonuses, team coupling) and update README with a short description of the NBA correlation process.
