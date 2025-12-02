@@ -17,8 +17,10 @@ This script:
 
 import argparse
 import csv
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -214,6 +216,231 @@ def _build_player_exposure(records: Sequence[LineupRecord]) -> Tuple[Dict[str, i
     for rec in records:
         counts.update(rec.players)
     return dict(counts), len(records)
+
+
+def _compute_realized_exposure(
+    dk_df: pd.DataFrame,
+    slot_cols: Sequence[int],
+) -> Tuple[Dict[Tuple[str, str], Dict[str, float]], int, float]:
+    """
+    Compute realized lineup and dollar exposure per (player, role) across
+    the filled DKEntries DataFrame.
+
+    Returns:
+        exposure: mapping (player_name, role) -> {
+            "lineup_exposure": percentage of DK entries containing the player
+                               in that role,
+            "dollar_exposure": percentage of total entry fees allocated to
+                               lineups where the player appears in that role,
+        }
+        num_entries: total number of DK entries with a non-empty Entry ID.
+        total_fees: total sum of Entry Fee across those entries.
+    """
+    if ENTRY_ID_COLUMN not in dk_df.columns:
+        raise KeyError(f"DKEntries CSV is missing '{ENTRY_ID_COLUMN}' column.")
+    if ENTRY_FEE_COLUMN not in dk_df.columns:
+        raise KeyError(f"DKEntries CSV is missing '{ENTRY_FEE_COLUMN}' column.")
+
+    entry_mask = dk_df[ENTRY_ID_COLUMN].notna() & (
+        dk_df[ENTRY_ID_COLUMN].astype(str).str.strip() != ""
+    )
+    entry_indices = [int(i) for i in dk_df.index[entry_mask]]
+    num_entries = len(entry_indices)
+    if num_entries == 0:
+        raise ValueError("DKEntries CSV contains no rows with a non-empty Entry ID.")
+
+    # Normalize Entry Fee to numeric for weighting.
+    fees = dk_df.loc[entry_indices, ENTRY_FEE_COLUMN]
+    try:
+        fee_values = fees.astype(float)
+    except ValueError:
+        fee_values = (
+            fees.astype(str)
+            .str.replace("$", "", regex=False)
+            .str.replace(",", "", regex=False)
+            .astype(float)
+        )
+    total_fees = float(fee_values.sum())
+
+    counts: Dict[Tuple[str, str], int] = {}
+    fee_sums: Dict[Tuple[str, str], float] = {}
+
+    for row_idx in entry_indices:
+        fee = float(fee_values.loc[row_idx])
+
+        # CPT slot.
+        cpt_cell = dk_df.iat[row_idx, slot_cols[0]]
+        cpt_name = _parse_player_name(str(cpt_cell))
+        key_cpt = (cpt_name, "CPT")
+        counts[key_cpt] = counts.get(key_cpt, 0) + 1
+        fee_sums[key_cpt] = fee_sums.get(key_cpt, 0.0) + fee
+
+        # FLEX slots.
+        for col_idx in slot_cols[1:]:
+            flex_cell = dk_df.iat[row_idx, col_idx]
+            flex_name = _parse_player_name(str(flex_cell))
+            key_flex = (flex_name, "FLEX")
+            counts[key_flex] = counts.get(key_flex, 0) + 1
+            fee_sums[key_flex] = fee_sums.get(key_flex, 0.0) + fee
+
+    exposure: Dict[Tuple[str, str], Dict[str, float]] = {}
+    for key, cnt in counts.items():
+        fee_sum = fee_sums.get(key, 0.0)
+        lineup_exposure = 100.0 * cnt / float(num_entries) if num_entries > 0 else 0.0
+        dollar_exposure = 100.0 * fee_sum / total_fees if total_fees > 0.0 else 0.0
+        exposure[key] = {
+            "lineup_exposure": lineup_exposure,
+            "dollar_exposure": dollar_exposure,
+        }
+
+    return exposure, num_entries, total_fees
+
+
+def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
+    """
+    Load per-player team and projected field ownership from the latest
+    lineups workbook's Projections sheet (original SaberSim CSV).
+
+    Returns:
+        mapping: player_name -> {
+            "team": team_abbrev or "",
+            "field_own_cpt": projected CPT ownership (%),
+            "field_own_flex": projected FLEX ownership (%),
+        }
+
+    Notes:
+        - When only a single aggregate ownership column (e.g. 'My Own') is
+          available, we currently apply the same value to both CPT and FLEX
+          roles for convenience.
+    """
+    outputs_dir = config.OUTPUTS_DIR
+    lineups_dir = outputs_dir / "lineups"
+    lineups_path = _resolve_latest_excel(lineups_dir, explicit=None)
+
+    xls = pd.ExcelFile(lineups_path)
+    try:
+        sabersim_df = pd.read_excel(xls, sheet_name="Projections")
+    except ValueError as exc:
+        raise KeyError(
+            "Lineups workbook missing 'Projections' sheet: "
+            f"{lineups_path}"
+        ) from exc
+
+    required_cols = {"Name", "Team", "My Proj", "My Own"}
+    missing = required_cols.difference(sabersim_df.columns)
+    if missing:
+        raise KeyError(
+            "Projections sheet missing required columns "
+            f"{sorted(missing)}. Expected at least {sorted(required_cols)}."
+        )
+
+    def _to_pct(value: float) -> float:
+        # Interpret SaberSim 'My Own' as already in percentage units (e.g., 0.67%).
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    grouped = sabersim_df.groupby(["Name", "Team"])
+
+    mapping: Dict[str, Dict[str, object]] = {}
+
+    for (name, team), g in grouped:
+        if len(g) == 0:
+            continue
+        g_sorted = g.sort_values(by="My Proj", ascending=False)
+        cpt_row = g_sorted.iloc[0]
+        cpt_pct = _to_pct(cpt_row["My Own"])
+
+        if len(g_sorted) > 1:
+            flex_row = g_sorted.iloc[1]
+            flex_pct = _to_pct(flex_row["My Own"])
+        else:
+            flex_pct = 0.0
+
+        name_str = str(name).strip()
+        team_str = str(team).strip()
+
+        # Keep first occurrence per player name.
+        if name_str not in mapping:
+            mapping[name_str] = {
+                "team": team_str,
+                "field_own_cpt": cpt_pct,
+                "field_own_flex": flex_pct,
+            }
+
+    return mapping
+
+
+def _write_ownership_summary_csv(
+    filled_df: pd.DataFrame,
+    slot_cols: Sequence[int],
+    base_dir: Path,
+) -> Path:
+    """
+    Write per-player ownership summary CSV alongside the filled DKEntries CSV.
+
+    Columns:
+        - player: player name
+        - team: team abbreviation (when available)
+        - role: 'CPT' or 'FLEX'
+        - field_ownership: projected field ownership (%) for that role
+        - lineup_exposure: percentage of DK entries containing the player
+                           in that role
+        - dollar_exposure: percentage of total entry fees allocated to
+                           lineups where the player appears in that role
+    """
+    exposure, _, _ = _compute_realized_exposure(filled_df, slot_cols)
+    ownership_map = _load_field_ownership_mapping()
+
+    rows: List[Dict[str, object]] = []
+    for (player_name, role), metrics in exposure.items():
+        info = ownership_map.get(player_name, {})
+        team = str(info.get("team", "") or "")
+        if role == "CPT":
+            field_own = float(info.get("field_own_cpt", 0.0))
+        else:
+            field_own = float(info.get("field_own_flex", 0.0))
+
+        rows.append(
+            {
+                "player": player_name,
+                "team": team,
+                "role": role,
+                "field_ownership": field_own,
+                "lineup_exposure": float(metrics.get("lineup_exposure", 0.0)),
+                "dollar_exposure": float(metrics.get("dollar_exposure", 0.0)),
+            }
+        )
+
+    if not rows:
+        # No exposure rows; still write an empty CSV with headers for consistency.
+        ownership_df = pd.DataFrame(
+            columns=[
+                "player",
+                "team",
+                "role",
+                "field_ownership",
+                "lineup_exposure",
+                "dollar_exposure",
+            ]
+        )
+    else:
+        ownership_df = pd.DataFrame(rows)
+        # Sort by dollar exposure desc, then player name.
+        ownership_df.sort_values(
+            by=["dollar_exposure", "player"],
+            ascending=[False, True],
+            inplace=True,
+        )
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = base_dir / "ownership.csv"
+    print(f"Writing ownership summary CSV to {output_path} ...")
+    ownership_df.to_csv(output_path, index=False)
+
+    return output_path
 
 
 def _assign_lineups_fee_aware(
@@ -418,19 +645,41 @@ def run(
         name_role_to_id=name_role_to_id,
     )
 
-    outputs_dir = config.OUTPUTS_DIR / "dkentries"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
+    outputs_root = config.OUTPUTS_DIR / "dkentries"
+    outputs_root.mkdir(parents=True, exist_ok=True)
 
+    # Determine timestamp directory for this run.
+    ts_str: Optional[str] = None
     if output_csv is not None:
-        output_path = Path(output_csv)
-    else:
-        # Timestamp based on diversified workbook path for stable grouping.
-        stem = diversified_path.stem
-        output_path = outputs_dir / f"DKEntries_filled_{stem}.csv"
+        out_path_requested = Path(output_csv)
+        m = re.search(r"(\\d{8}_\\d{6})", out_path_requested.stem)
+        if m and out_path_requested.parent == outputs_root:
+            ts_str = m.group(1)
 
+    if ts_str is None:
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    base_dir = outputs_root / ts_str
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
+    output_path = base_dir / "dkentries.csv"
     print(f"Writing filled DKEntries CSV to {output_path} ...")
     filled_df.to_csv(output_path, index=False)
     print("Done.")
+
+    # Also write the diversified lineups as diversified.csv for convenience.
+    diversified_csv_path = base_dir / "diversified.csv"
+    print(f"Writing diversified lineups CSV to {diversified_csv_path} ...")
+    diversified_df.to_csv(diversified_csv_path, index=False)
+
+    # Write ownership summary sidecar CSV.
+    _write_ownership_summary_csv(
+        filled_df=filled_df,
+        slot_cols=slot_cols,
+        base_dir=base_dir,
+    )
+
     return output_path
 
 
