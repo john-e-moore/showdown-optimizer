@@ -50,10 +50,6 @@ def load_sabersim_projections(path: str | Path) -> pd.DataFrame:
         .first()
     )
 
-    # Optional filter to offensive positions
-    if SABERSIM_POS_COL in df.columns and config.OFFENSIVE_POSITIONS:
-        df = df[df[SABERSIM_POS_COL].isin(config.OFFENSIVE_POSITIONS)]
-
     return df
 
 

@@ -36,7 +36,7 @@ DIAGNOSTICS_DIR: Final[Path] = config_base.get_diagnostics_dir_for_sport("nba")
 # -----------------------------------------------------------------------------
 
 SABERSIM_CSV: Final[str] = str(
-    SABERSIM_DIR / "NBA_showdown_example.csv"
+    SABERSIM_DIR / "NBA_2025-12-02-1100pm_DK_SHOWDOWN_OKC-@-GSW.csv"
 )
 
 OUTPUT_CORR_EXCEL: Final[str] = str(
