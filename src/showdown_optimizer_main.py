@@ -20,12 +20,22 @@ import time
 import pandas as pd
 
 from . import config
-from .showdown_constraints import build_custom_constraints
+from .showdown_constraints import build_custom_constraints, build_team_stack_constraint
 from .lineup_optimizer import (
     Lineup,
     load_players_from_sabersim,
     optimize_showdown_lineups,
 )
+
+
+STACK_PATTERNS: tuple[str, ...] = ("5|1", "4|2", "3|3", "2|4", "1|5")
+STACK_PATTERN_COUNTS: dict[str, tuple[int, int]] = {
+    "5|1": (5, 1),
+    "4|2": (4, 2),
+    "3|3": (3, 3),
+    "2|4": (2, 4),
+    "1|5": (1, 5),
+}
 
 
 def _format_lineup(lineup: Lineup, idx: int) -> str:
@@ -48,6 +58,107 @@ def _format_lineup(lineup: Lineup, idx: int) -> str:
         )
 
     return "\n".join(lines)
+
+
+def _parse_stack_weights(raw: str | None) -> dict[str, float]:
+    """
+    Parse a stack-weights string into normalized weights over STACK_PATTERNS.
+
+    Examples:
+        None -> equal weights over all patterns.
+        "5|1=0.3,4|2=0.25,3|3=0.2,2|4=0.15,1|5=0.1"
+    """
+    if raw is None:
+        # Equal weights over all patterns.
+        return {pattern: 1.0 / len(STACK_PATTERNS) for pattern in STACK_PATTERNS}
+
+    weights: dict[str, float] = {pattern: 0.0 for pattern in STACK_PATTERNS}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(
+                f"Invalid stack weight component {part!r}; expected 'PATTERN=weight'."
+            )
+        key, value = part.split("=", 1)
+        key = key.strip()
+        if key not in STACK_PATTERNS:
+            raise ValueError(
+                f"Unknown stack pattern {key!r} in --stack-weights. "
+                f"Expected one of {list(STACK_PATTERNS)}."
+            )
+        try:
+            weight = float(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid weight {value!r} for pattern {key!r}; expected a float."
+            ) from exc
+        if weight < 0:
+            raise ValueError(
+                f"Negative weight {weight!r} for pattern {key!r} is not allowed."
+            )
+        weights[key] = weight
+
+    total = sum(weights.values())
+    if total <= 0:
+        raise ValueError(
+            "All stack weights are zero or negative; please specify positive weights."
+        )
+
+    return {pattern: (weights[pattern] / total) for pattern in STACK_PATTERNS}
+
+
+def _allocate_lineups_across_patterns(
+    num_lineups: int, weights: dict[str, float]
+) -> dict[str, int]:
+    """
+    Given total num_lineups and normalized weights, compute integer lineup
+    counts per stack pattern that sum exactly to num_lineups.
+    """
+    if num_lineups <= 0:
+        return {pattern: 0 for pattern in STACK_PATTERNS}
+
+    # Initial floor allocation.
+    counts: dict[str, int] = {}
+    remaining = num_lineups
+    for pattern in STACK_PATTERNS:
+        w = max(weights.get(pattern, 0.0), 0.0)
+        n = int(num_lineups * w)
+        counts[pattern] = n
+        remaining -= n
+
+    # Distribute any leftover lineups to patterns with positive weight in a
+    # fixed priority order.
+    positive_patterns = [p for p in STACK_PATTERNS if weights.get(p, 0.0) > 0.0]
+    if not positive_patterns:
+        positive_patterns = list(STACK_PATTERNS)
+
+    idx = 0
+    while remaining > 0:
+        pattern = positive_patterns[idx % len(positive_patterns)]
+        counts[pattern] += 1
+        remaining -= 1
+        idx += 1
+
+    return counts
+
+
+def _build_stack_pattern_label(
+    pattern: str,
+    team_a: str,
+    team_b: str,
+    team_a_count: int,
+    team_b_count: int,
+) -> str:
+    """
+    Human-readable label describing which stack pattern/run produced a lineup.
+    """
+    if team_a_count > team_b_count:
+        return f"{pattern}_{team_a}-heavy"
+    if team_b_count > team_a_count:
+        return f"{pattern}_{team_b}-heavy"
+    return pattern
 
 
 def main() -> None:
@@ -85,6 +196,27 @@ def main() -> None:
             "use a single growing model (legacy behavior)."
         ),
     )
+    parser.add_argument(
+        "--stack-mode",
+        type=str,
+        choices=["none", "multi"],
+        default="none",
+        help=(
+            "Stacking mode: 'none' (default) runs a single optimization pass. "
+            "'multi' splits --num-lineups across 5|1, 4|2, 3|3, 2|4, 1|5 "
+            "team stack patterns and runs one pass per pattern."
+        ),
+    )
+    parser.add_argument(
+        "--stack-weights",
+        type=str,
+        default=None,
+        help=(
+            "Optional weights for multi-stack mode, e.g. "
+            "'5|1=0.3,4|2=0.25,3|3=0.2,2|4=0.15,1|5=0.1'. "
+            "If omitted in multi-stack mode, all patterns are weighted equally."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -108,19 +240,91 @@ def main() -> None:
     # Load players for ownership/opponent metadata.
     player_pool = load_players_from_sabersim(csv_path)
     players_by_id = {p.player_id: p for p in player_pool.players}
+    # All distinct teams present in the slate (used for both stack modes and
+    # for building exposure/ownership opponent mappings later).
+    teams = sorted({p.team for p in player_pool.players})
 
     # Prepare any custom DFS constraints from the configuration module.
     constraint_builders = build_custom_constraints()
 
     # Optimize lineups (pattern can be a concrete path) and time the run.
     start_time = time.perf_counter()
-    lineups = optimize_showdown_lineups(
-        projections_path_pattern=csv_path,
-        num_lineups=args.num_lineups,
-        salary_cap=args.salary_cap,
-        constraint_builders=constraint_builders,
-        chunk_size=args.chunk_size,
-    )
+
+    stack_pattern_labels: list[str] = []
+
+    if args.stack_mode == "none":
+        lineups = optimize_showdown_lineups(
+            projections_path_pattern=csv_path,
+            num_lineups=args.num_lineups,
+            salary_cap=args.salary_cap,
+            constraint_builders=constraint_builders,
+            chunk_size=args.chunk_size,
+        )
+        stack_pattern_labels = ["none"] * len(lineups)
+    else:
+        # Multi-stack mode uses team-level stack constraints across the two teams.
+        if len(teams) != 2:
+            raise ValueError(
+                "Multi-stack mode requires exactly two distinct teams in the slate."
+            )
+
+        team_a, team_b = teams
+        weights = _parse_stack_weights(args.stack_weights)
+        pattern_counts = _allocate_lineups_across_patterns(
+            args.num_lineups, weights
+        )
+
+        all_lineups: list[Lineup] = []
+        all_labels: list[str] = []
+
+        for pattern in STACK_PATTERNS:
+            n = pattern_counts.get(pattern, 0)
+            if n <= 0:
+                continue
+
+            team_a_count, team_b_count = STACK_PATTERN_COUNTS[pattern]
+            stack_constraint = build_team_stack_constraint(
+                team_a=team_a,
+                team_b=team_b,
+                team_a_count=team_a_count,
+                team_b_count=team_b_count,
+            )
+            pattern_constraint_builders = list(constraint_builders) + [
+                stack_constraint
+            ]
+
+            pattern_lineups = optimize_showdown_lineups(
+                projections_path_pattern=csv_path,
+                num_lineups=n,
+                salary_cap=args.salary_cap,
+                constraint_builders=pattern_constraint_builders,
+                chunk_size=args.chunk_size,
+            )
+            if not pattern_lineups:
+                continue
+
+            label = _build_stack_pattern_label(
+                pattern, team_a, team_b, team_a_count, team_b_count
+            )
+            for lu in pattern_lineups:
+                all_lineups.append(lu)
+                all_labels.append(label)
+
+        # Deduplicate by player composition across all runs.
+        dedup_lineups: list[Lineup] = []
+        dedup_labels: list[str] = []
+        seen: set[tuple[str, ...]] = set()
+
+        for lu, label in zip(all_lineups, all_labels):
+            key = tuple(sorted(lu.as_tuple_ids()))
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup_lineups.append(lu)
+            dedup_labels.append(label)
+
+        lineups = dedup_lineups
+        stack_pattern_labels = dedup_labels
     elapsed = time.perf_counter() - start_time
 
     if not lineups:
@@ -154,8 +358,6 @@ def main() -> None:
         for p in lineup.flex:
             flex_counts[p.player_id] += 1
 
-    # Map team -> opponent (assume standard two-team Showdown slate).
-    teams = sorted({p.team for p in player_pool.players})
     if len(teams) == 2:
         opp_map = {teams[0]: teams[1], teams[1]: teams[0]}
     else:
@@ -280,6 +482,9 @@ def main() -> None:
             "lineup_projection": lineup.projection(),
             "lineup_salary": lineup.salary(),
             "stack": stack_str,
+            "target_stack_pattern": (
+                stack_pattern_labels[idx] if idx < len(stack_pattern_labels) else ""
+            ),
             "cpt": fmt_player_with_own(lineup.cpt.player_id, slot="CPT"),
         }
         for j, p in enumerate(lineup.flex, start=1):

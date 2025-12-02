@@ -121,6 +121,43 @@ def rb_cpt_forbid_opposing_dst() -> ConstraintBuilder:
     return builder
 
 
+def build_team_stack_constraint(
+    team_a: str,
+    team_b: str,
+    team_a_count: int,
+    team_b_count: int,
+) -> ConstraintBuilder:
+    """
+    Enforce exact team-level player counts for a two-team Showdown slate.
+
+    Assumes the underlying roster rules already enforce exactly 6 players
+    total (1 CPT + 5 FLEX). This constraint pins the number of players from
+    `team_a` and `team_b` to specified counts across all slots.
+    """
+
+    def builder(prob: pulp.LpProblem, x, player_pool: PlayerPool) -> None:
+        # Only apply when both teams are present in the player pool.
+        teams = {p.team for p in player_pool.players}
+        if team_a not in teams or team_b not in teams:
+            return
+
+        def _team_total(team: str) -> pulp.LpAffineExpression:
+            return pulp.lpSum(
+                x[(p.player_id, slot)]
+                for p in player_pool.players
+                if p.team == team
+                for slot in SLOTS
+            )
+
+        total_a = _team_total(team_a)
+        total_b = _team_total(team_b)
+
+        prob += total_a == team_a_count, f"stack_{team_a}_{team_a_count}"
+        prob += total_b == team_b_count, f"stack_{team_b}_{team_b_count}"
+
+    return builder
+
+
 def build_custom_constraints() -> List[ConstraintBuilder]:
     """
     Return the list of custom constraints to apply for this slate.
