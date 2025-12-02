@@ -32,6 +32,7 @@ or with explicit inputs:
 """
 
 import argparse
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -179,6 +180,113 @@ def _load_contest_lineups(contest_csv: Path) -> Tuple[pd.DataFrame, List[ParsedL
         )
 
     return standings_df, parsed
+
+
+def _load_payout_structure(
+    payouts_csv: str | None,
+    contest_id: str,
+    num_entries: int,
+) -> Tuple[np.ndarray, float] | None:
+    """
+    Load DraftKings payout structure for a contest and build a rank→payout array.
+
+    Args:
+        payouts_csv: Optional explicit path passed via --payouts-csv. Despite the
+            name, this is expected to point to the DraftKings payout JSON.
+        contest_id: Contest identifier string (e.g., '185418998').
+        num_entries: Number of entries in the contest standings CSV.
+
+    Returns:
+        (payouts, entry_fee) where:
+          - payouts: float array of length num_entries where payouts[pos-1] is
+            the cash payout for finishing position `pos` (0.0 for unpaid).
+          - entry_fee: contest entry fee as a float.
+
+        Returns None if no default payout file is found when payouts_csv is None.
+
+    Raises:
+        FileNotFoundError: if an explicit payouts_csv path is provided but does
+            not exist.
+        ValueError: if the JSON structure is missing expected keys.
+    """
+    payouts_dir = config.DATA_DIR / "payouts"
+
+    if payouts_csv is not None:
+        path = Path(payouts_csv)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Specified payout file does not exist: {path} "
+                "(from --payouts-csv)."
+            )
+    else:
+        path = payouts_dir / f"payouts-{contest_id}.json"
+        if not path.is_file():
+            print(
+                f"Warning: No payout file found at inferred path {path}. "
+                "Skipping ROI computation."
+            )
+            return None
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse payout JSON at {path}: {exc}") from exc
+
+    try:
+        detail = raw["contestDetail"]
+    except (TypeError, KeyError) as exc:
+        raise ValueError(
+            f"Payout JSON at {path} missing 'contestDetail' section."
+        ) from exc
+
+    try:
+        entry_fee = float(detail.get("entryFee", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Payout JSON at {path} has non-numeric 'entryFee' field."
+        ) from exc
+
+    payout_summary = detail.get("payoutSummary", [])
+    payouts = np.zeros(num_entries, dtype=float)
+
+    if not isinstance(payout_summary, list):
+        raise ValueError(
+            f"Payout JSON at {path} has unexpected 'payoutSummary' format; "
+            "expected a list."
+        )
+
+    for tier in payout_summary:
+        try:
+            min_pos = int(tier.get("minPosition", 0))
+            max_pos = int(tier.get("maxPosition", min_pos))
+        except (TypeError, ValueError):
+            continue
+
+        if max_pos < 1 or min_pos < 1:
+            continue
+
+        payout_descs = tier.get("payoutDescriptions") or []
+        value: float = 0.0
+        if isinstance(payout_descs, list):
+            for desc in payout_descs:
+                if not isinstance(desc, dict):
+                    continue
+                if "value" in desc:
+                    try:
+                        value = float(desc["value"])
+                    except (TypeError, ValueError):
+                        continue
+                    break
+        if value <= 0.0:
+            continue
+
+        for pos in range(min_pos, max_pos + 1):
+            idx = pos - 1
+            if 0 <= idx < num_entries:
+                payouts[idx] = value
+
+    return payouts, entry_fee
 
 
 def _build_player_universe_and_weights(
@@ -433,6 +541,58 @@ def _compute_lineup_finish_rates(
     return top1, top5, top20, avg_points
 
 
+def _compute_sim_roi(
+    scores: np.ndarray,
+    payouts_by_rank: np.ndarray,
+    entry_fee: float,
+) -> np.ndarray:
+    """
+    Compute simulated ROI for each lineup given a payout structure.
+
+    Args:
+        scores: array of shape (num_sims, num_lineups) with DK scores.
+        payouts_by_rank: array where payouts_by_rank[pos-1] is the dollar
+            payout for finishing position `pos` (0 for unpaid positions).
+        entry_fee: contest entry fee (must be > 0).
+
+    Returns:
+        sim_roi: array of shape (num_lineups,) with expected ROI per lineup:
+            (expected_payout - entry_fee) / entry_fee.
+    """
+    if scores.ndim != 2:
+        raise ValueError("scores must be a 2D array of shape (num_sims, num_lineups).")
+    if entry_fee <= 0:
+        raise ValueError("entry_fee must be positive for ROI computation.")
+
+    num_sims, num_lineups = scores.shape
+
+    payouts = np.asarray(payouts_by_rank, dtype=float).reshape(-1)
+    if payouts.size == 0:
+        return np.zeros(num_lineups, dtype=float)
+
+    # Ensure we have payouts defined for at least num_lineups positions.
+    if payouts.size < num_lineups:
+        payouts_full = np.zeros(num_lineups, dtype=float)
+        payouts_full[:payouts.size] = payouts
+    else:
+        payouts_full = payouts[:num_lineups]
+
+    # argsort in descending order per simulation to get rank positions.
+    order = np.argsort(-scores, axis=1)  # shape (num_sims, num_lineups)
+
+    # Invert permutations to get rank indices per lineup.
+    ranks = np.empty_like(order)
+    row_indices = np.arange(num_sims)[:, None]
+    ranks[row_indices, order] = np.arange(num_lineups)[None, :]
+
+    # Map rank indices (0-based) to payouts_full.
+    payout_matrix = payouts_full[ranks]  # shape (num_sims, num_lineups)
+    roi_matrix = (payout_matrix - entry_fee) / entry_fee
+
+    sim_roi = roi_matrix.mean(axis=0)
+    return sim_roi
+
+
 def _build_sabersim_ownership_and_salary(
     sabersim_raw_df: pd.DataFrame,
 ) -> Dict[Tuple[str, str], Dict[str, float]]:
@@ -579,20 +739,23 @@ def _build_entrant_summary(
     """
     # Mean performance metrics by entrant.
     grouped = simulation_df.groupby("Entrant", as_index=False)
-    summary = grouped.agg(
-        {
-            "Top 1%": "mean",
-            "Top 5%": "mean",
-            "Top 20%": "mean",
-            "Avg Points": "mean",
-        }
-    )
+    agg_spec: Dict[str, str] = {
+        "Top 1%": "mean",
+        "Top 5%": "mean",
+        "Top 20%": "mean",
+        "Avg Points": "mean",
+    }
+    if "Sim ROI" in simulation_df.columns:
+        agg_spec["Sim ROI"] = "mean"
+
+    summary = grouped.agg(agg_spec)
     summary.rename(
         columns={
             "Top 1%": "Avg. Top 1%",
             "Top 5%": "Avg. Top 5%",
             "Top 20%": "Avg. Top 20%",
             "Avg Points": "Avg Points",
+            "Sim ROI": "Avg. Sim ROI",
         },
         inplace=True,
     )
@@ -604,9 +767,13 @@ def _build_entrant_summary(
     )
 
     summary = entries_df.merge(summary, on="Entrant", how="left")
-    summary = summary[
-        ["Entrant", "Entries", "Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"]
-    ]
+
+    # Final column ordering.
+    cols = ["Entrant", "Entries"]
+    if "Avg. Sim ROI" in summary.columns:
+        cols.append("Avg. Sim ROI")
+    cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
+    summary = summary[cols]
     return summary
 
 
@@ -629,6 +796,8 @@ def _build_player_summary(
                 "CPT proj ownership",
                 "FLEX draft %",
                 "FLEX proj ownership",
+                "CPT Sim ROI",
+                "FLEX Sim ROI",
                 "CPT top 1% rate",
                 "FLEX top 1% rate",
                 "CPT top 20% rate",
@@ -641,6 +810,7 @@ def _build_player_summary(
     for _, row in simulation_df.iterrows():
         top1 = float(row["Top 1%"])
         top20 = float(row["Top 20%"])
+        sim_roi = float(row["Sim ROI"]) if "Sim ROI" in simulation_df.columns else 0.0
         cpt = str(row["CPT"])
         records.append(
             {
@@ -648,6 +818,7 @@ def _build_player_summary(
                 "role": "CPT",
                 "Top 1%": top1,
                 "Top 20%": top20,
+                "Sim ROI": sim_roi,
             }
         )
         for col in ["Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]:
@@ -658,6 +829,7 @@ def _build_player_summary(
                     "role": "FLEX",
                     "Top 1%": top1,
                     "Top 20%": top20,
+                    "Sim ROI": sim_roi,
                 }
             )
 
@@ -694,6 +866,12 @@ def _build_player_summary(
                 "CPT proj ownership": float(proj.get("cpt_proj_own", 0.0)),
                 "FLEX draft %": flex_draft,
                 "FLEX proj ownership": float(proj.get("flex_proj_own", 0.0)),
+                "CPT Sim ROI": _safe_mean(sub_cpt["Sim ROI"])
+                if "Sim ROI" in sub_cpt.columns
+                else 0.0,
+                "FLEX Sim ROI": _safe_mean(sub_flex["Sim ROI"])
+                if "Sim ROI" in sub_flex.columns
+                else 0.0,
                 "CPT top 1% rate": _safe_mean(sub_cpt["Top 1%"]),
                 "FLEX top 1% rate": _safe_mean(sub_flex["Top 1%"]),
                 "CPT top 20% rate": _safe_mean(sub_cpt["Top 20%"]),
@@ -709,6 +887,7 @@ def run(
     sabersim_csv: str | None = None,
     num_sims: int = 100_000,
     random_seed: int | None = None,
+    payouts_csv: str | None = None,
 ) -> Path:
     """
     Execute the flashback contest simulation pipeline.
@@ -723,6 +902,16 @@ def run(
     contest_path = _resolve_latest_csv(contest_dir, contest_csv)
     sabersim_path = _resolve_latest_csv(sabersim_dir, sabersim_csv)
 
+    # Extract contest_id from the contest standings filename, which is expected
+    # to follow the pattern 'contest-standings-{contest_id}.csv'.
+    contest_filename = contest_path.name
+    m = re.search(r"contest-standings-(\d+)\.csv$", contest_filename)
+    if m:
+        contest_id = m.group(1)
+    else:
+        # Fallback: use the stem if pattern does not match.
+        contest_id = contest_path.stem
+
     print(f"Using contest CSV: {contest_path}")
     print(f"Using Sabersim CSV: {sabersim_path}")
 
@@ -730,6 +919,20 @@ def run(
     standings_df, parsed_lineups = _load_contest_lineups(contest_path)
     if not parsed_lineups:
         raise ValueError("No lineups parsed from contest CSV.")
+
+    num_entries = len(standings_df)
+
+    # Optional: load payout structure for ROI computation.
+    payout_result = _load_payout_structure(
+        payouts_csv=payouts_csv,
+        contest_id=str(contest_id),
+        num_entries=num_entries,
+    )
+    if payout_result is not None:
+        payouts_by_rank, entry_fee = payout_result
+    else:
+        payouts_by_rank = None
+        entry_fee = None
 
     player_names_from_lineups, player_index_from_lineups, W, sim_lineups_df = (
         _build_player_universe_and_weights(parsed_lineups)
@@ -784,8 +987,19 @@ def run(
     scores = X @ W_univ.T  # shape (num_sims, num_lineups)
     top1, top5, top20, avg_points = _compute_lineup_finish_rates(scores)
 
+    # Optional: simulated ROI per lineup given payout structure.
+    sim_roi: np.ndarray | None = None
+    if payouts_by_rank is not None and entry_fee is not None and entry_fee > 0:
+        sim_roi = _compute_sim_roi(
+            scores=scores,
+            payouts_by_rank=payouts_by_rank,
+            entry_fee=float(entry_fee),
+        )
+
     # Build Simulation sheet.
     simulation_df = sim_lineups_df.copy()
+    if sim_roi is not None:
+        simulation_df["Sim ROI"] = sim_roi
     simulation_df["Top 1%"] = top1
     simulation_df["Top 5%"] = top5
     simulation_df["Top 20%"] = top20
@@ -810,6 +1024,46 @@ def run(
             cols.insert(avg_idx + 1, "Actual Points")
             simulation_df = simulation_df[cols]
 
+        # Optional: Actual ROI based on realized rank and payout structure.
+        if payouts_by_rank is not None and entry_fee is not None and entry_fee > 0:
+            if "Rank" in standings_df.columns:
+                rank_df = standings_df[["EntryName", "Rank"]].copy()
+                rank_df["Rank"] = pd.to_numeric(
+                    rank_df["Rank"], errors="coerce"
+                )
+
+                def _rank_to_payout(rank_val: float) -> float:
+                    if pd.isna(rank_val):
+                        return 0.0
+                    try:
+                        r_int = int(rank_val)
+                    except (TypeError, ValueError):
+                        return 0.0
+                    if r_int < 1 or r_int > len(payouts_by_rank):
+                        return 0.0
+                    return float(payouts_by_rank[r_int - 1])
+
+                rank_df["Actual ROI"] = rank_df["Rank"].map(_rank_to_payout)
+                rank_df["Actual ROI"] = (
+                    rank_df["Actual ROI"] - float(entry_fee)
+                ) / float(entry_fee)
+                actual_roi_df = (
+                    rank_df[["EntryName", "Actual ROI"]]
+                    .drop_duplicates(subset=["EntryName"])
+                    .copy()
+                )
+                simulation_df = simulation_df.merge(
+                    actual_roi_df, on="EntryName", how="left"
+                )
+
+                # Place Actual ROI immediately after Actual Points when present.
+                cols = list(simulation_df.columns)
+                if "Actual ROI" in cols and "Actual Points" in cols:
+                    cols.remove("Actual ROI")
+                    anchor_idx = cols.index("Actual Points")
+                    cols.insert(anchor_idx + 1, "Actual ROI")
+                    simulation_df = simulation_df[cols]
+
     # Duplicates: how many times this exact lineup (CPT + 5 FLEX) was entered.
     lineup_cols = ["CPT", "Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]
     if all(col in simulation_df.columns for col in lineup_cols):
@@ -825,6 +1079,14 @@ def run(
             cols.remove("Duplicates")
             cols.insert(anchor_idx + 1, "Duplicates")
             simulation_df = simulation_df[cols]
+
+    # Ensure Sim ROI, when present, appears immediately before 'Top 1%'.
+    cols = list(simulation_df.columns)
+    if "Sim ROI" in cols and "Top 1%" in cols:
+        cols.remove("Sim ROI")
+        top1_idx = cols.index("Top 1%")
+        cols.insert(top1_idx, "Sim ROI")
+        simulation_df = simulation_df[cols]
 
     # ------------------------------------------------------------------
     # Compute stack label per lineup using Sabersim team info.
@@ -965,6 +1227,18 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--payouts-csv",
+        type=str,
+        default=None,
+        help=(
+            "Path to DraftKings payout JSON for this contest under data/payouts/. "
+            "Despite the name, this flag expects the JSON format used in "
+            "payouts-*.json. If omitted, the script will look for "
+            "data/payouts/payouts-{contest_id}.json inferred from the contest "
+            "standings filename."
+        ),
+    )
+    parser.add_argument(
         "--num-sims",
         type=int,
         default=100_000,
@@ -989,6 +1263,7 @@ def main(argv: List[str] | None = None) -> None:
         sabersim_csv=args.sabersim_csv,
         num_sims=args.num_sims,
         random_seed=args.random_seed,
+        payouts_csv=args.payouts_csv,
     )
 
 

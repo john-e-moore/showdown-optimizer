@@ -278,10 +278,13 @@ correlation engine via `src.flashback_sim`. This script:
 - Simulates correlated DK scores for all players and scores every contest lineup.
 - Writes an Excel workbook under `outputs/flashback/` with:
   - `Standings`: original contest CSV.
-  - `Simulation`: CPT/FLEX players, Top 1% / Top 5% / Top 20% finish rates, and
-    average DK points per lineup.
-  - `Entrant summary`: average metrics across entries per entrant.
-  - `Player summary`: draft rates and performance by role (CPT vs FLEX).
+  - `Simulation`: CPT/FLEX players, **Sim ROI**, Top 1% / Top 5% / Top 20% finish
+    rates, and average DK points per lineup (plus actual points/ROI when the
+    payout file is available).
+  - `Entrant summary`: average metrics across entries per entrant, including
+    **Avg. Sim ROI** when payouts are available.
+  - `Player summary`: draft rates and performance by role (CPT vs FLEX),
+    including **CPT Sim ROI** and **FLEX Sim ROI** when payouts are available.
 
 From the project root, if you have a contest CSV in `data/contests/` and a
 matching Sabersim CSV in `data/sabersim/`, you can run:
@@ -296,11 +299,23 @@ To specify the exact inputs and number of simulations:
 python -m src.flashback_sim \
   --contest-csv data/contests/my_contest.csv \
   --sabersim-csv data/sabersim/my_slate.csv \
-  --num-sims 20000
+  --num-sims 20000 \
+  --payouts-csv data/payouts/payouts-123456789.json
 ```
 
 If `--contest-csv` or `--sabersim-csv` are omitted, the script will
 automatically pick the most recent `.csv` in the corresponding directory.
+
+If `--payouts-csv` is omitted, the script will look for a DraftKings payout JSON
+named `payouts-{contest_id}.json` under `data/payouts/`, where `{contest_id}`
+comes from the contest standings filename (e.g., `contest-standings-185418998.csv`
+→ `payouts-185418998.json`). The **Sim ROI** values are defined as:
+
+\[
+\text{ROI} = \frac{\mathbb{E}[\text{payout}] - \text{entry fee}}{\text{entry fee}}
+\]
+
+so `0.5` means +50% ROI and negative values mean losing money on average.
 
 ### End-to-end pipeline with run_full.sh
 
