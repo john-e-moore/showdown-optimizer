@@ -791,6 +791,41 @@ def run(
     simulation_df["Top 20%"] = top20
     simulation_df["Avg Points"] = avg_points
 
+    # Actual Points: pull from the original contest standings CSV.
+    if "EntryName" in simulation_df.columns and "Points" in standings_df.columns:
+        points_df = (
+            standings_df[["EntryName", "Points"]]
+            .drop_duplicates(subset=["EntryName"])
+            .copy()
+        )
+        points_df["Points"] = pd.to_numeric(points_df["Points"], errors="coerce")
+        simulation_df = simulation_df.merge(points_df, on="EntryName", how="left")
+        simulation_df.rename(columns={"Points": "Actual Points"}, inplace=True)
+
+        # Ensure Actual Points appears immediately after 'Avg Points'.
+        cols = list(simulation_df.columns)
+        if "Avg Points" in cols and "Actual Points" in cols:
+            cols.remove("Actual Points")
+            avg_idx = cols.index("Avg Points")
+            cols.insert(avg_idx + 1, "Actual Points")
+            simulation_df = simulation_df[cols]
+
+    # Duplicates: how many times this exact lineup (CPT + 5 FLEX) was entered.
+    lineup_cols = ["CPT", "Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]
+    if all(col in simulation_df.columns for col in lineup_cols):
+        dup_counts = simulation_df.groupby(lineup_cols)["Entrant"].transform("size")
+        # Ensure Duplicates appears immediately after 'Actual Points' (or
+        # 'Avg Points' if Actual Points is unavailable).
+        simulation_df["Duplicates"] = dup_counts
+        cols = list(simulation_df.columns)
+        anchor_col = "Actual Points" if "Actual Points" in cols else "Avg Points"
+        if anchor_col in cols:
+            anchor_idx = cols.index(anchor_col)
+            # Move Duplicates to right after the anchor column.
+            cols.remove("Duplicates")
+            cols.insert(anchor_idx + 1, "Duplicates")
+            simulation_df = simulation_df[cols]
+
     # ------------------------------------------------------------------
     # Compute stack label per lineup using Sabersim team info.
     # ------------------------------------------------------------------
@@ -881,8 +916,16 @@ def run(
     # Output path.
     flashback_dir = config.OUTPUTS_DIR / FLASHBACK_SUBDIR
     flashback_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = flashback_dir / f"flashback_{timestamp}.xlsx"
+    # Use contest_id from the contest standings CSV filename, which is expected to
+    # follow the pattern 'contest-standings-{contest_id}.csv'.
+    contest_filename = contest_path.name
+    m = re.search(r"contest-standings-(\d+)\.csv$", contest_filename)
+    if m:
+        contest_id = m.group(1)
+    else:
+        # Fallback: use the stem if pattern does not match.
+        contest_id = contest_path.stem
+    output_path = flashback_dir / f"flashback_{contest_id}.xlsx"
 
     print(f"Writing flashback results to {output_path}...")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:

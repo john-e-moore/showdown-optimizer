@@ -267,6 +267,41 @@ Typical choices:
 - Use `--max-overlap` between 3 and 5 to control how aggressively you diversify
   player combinations across the final portfolio.
 
+### Flashback contest simulation for completed Showdown contests
+
+You can analyze a **completed** DraftKings Showdown contest using the same
+correlation engine via `src.flashback_sim`. This script:
+
+- Loads a finished contest CSV from `data/contests/`.
+- Loads matching Sabersim projections from `data/sabersim/`.
+- Rebuilds a player correlation matrix from the Sabersim projections.
+- Simulates correlated DK scores for all players and scores every contest lineup.
+- Writes an Excel workbook under `outputs/flashback/` with:
+  - `Standings`: original contest CSV.
+  - `Simulation`: CPT/FLEX players, Top 1% / Top 5% / Top 20% finish rates, and
+    average DK points per lineup.
+  - `Entrant summary`: average metrics across entries per entrant.
+  - `Player summary`: draft rates and performance by role (CPT vs FLEX).
+
+From the project root, if you have a contest CSV in `data/contests/` and a
+matching Sabersim CSV in `data/sabersim/`, you can run:
+
+```bash
+python -m src.flashback_sim
+```
+
+To specify the exact inputs and number of simulations:
+
+```bash
+python -m src.flashback_sim \
+  --contest-csv data/contests/my_contest.csv \
+  --sabersim-csv data/sabersim/my_slate.csv \
+  --num-sims 20000
+```
+
+If `--contest-csv` or `--sabersim-csv` are omitted, the script will
+automatically pick the most recent `.csv` in the corresponding directory.
+
 ### End-to-end pipeline with run_full.sh
 
 You can run the full four-step pipeline (correlation → lineups → top1% →
