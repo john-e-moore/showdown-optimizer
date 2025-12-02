@@ -128,11 +128,14 @@ def _build_name_role_to_id_map(df: pd.DataFrame) -> Dict[Tuple[str, str], str]:
     return mapping
 
 
-def _get_lineup_slot_columns(df: pd.DataFrame) -> List[str]:
+def _get_lineup_slot_columns(df: pd.DataFrame) -> List[int]:
     """
     Identify the 6 contiguous columns corresponding to CPT + 5 FLEX slots.
 
-    We locate the first 'CPT' column and then take it plus the next 5 columns.
+    We locate the first 'CPT' column and then take its positional index plus the
+    next 5 indices. Returning positional indices (rather than column labels)
+    avoids pandas' ambiguous behaviour when there are duplicate column names
+    such as multiple 'FLEX' columns in the DKEntries template.
     """
     cols = list(df.columns)
     try:
@@ -146,7 +149,8 @@ def _get_lineup_slot_columns(df: pd.DataFrame) -> List[str]:
             "(CPT + 5 FLEX)."
         )
 
-    return cols[idx_cpt : idx_cpt + 6]
+    # Return integer column indices for CPT followed by 5 FLEX slots.
+    return list(range(idx_cpt, idx_cpt + 6))
 
 
 def _load_diversified_lineups(
@@ -325,7 +329,7 @@ def _assign_lineups_fee_aware(
 
 def _apply_assignments_to_dkentries(
     dk_df: pd.DataFrame,
-    slot_cols: Sequence[str],
+    slot_cols: Sequence[int],
     assignment: Mapping[int, LineupRecord],
     name_role_to_id: Mapping[Tuple[str, str], str],
 ) -> pd.DataFrame:
@@ -339,7 +343,7 @@ def _apply_assignments_to_dkentries(
         if len(slot_cols) != 6 or len(rec.players) != 6:
             raise ValueError("Expected 6 lineup slots and 6 players per lineup.")
 
-        for j, col in enumerate(slot_cols):
+        for j, col_idx in enumerate(slot_cols):
             name = rec.players[j]
             role = "CPT" if j == 0 else "FLEX"
             key = (name, role)
@@ -350,7 +354,9 @@ def _apply_assignments_to_dkentries(
                 )
             player_id = name_role_to_id[key]
             formatted = f"{name} ({player_id})"
-            result.at[row_idx, col] = formatted
+            # Use positional indexing so duplicate column labels (e.g., multiple
+            # 'FLEX' columns) are updated independently.
+            result.iat[row_idx, col_idx] = formatted
 
     return result
 
