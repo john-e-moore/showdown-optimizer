@@ -327,7 +327,7 @@ so `0.5` means +50% ROI and negative values mean losing money on average.
 ### End-to-end pipeline with run_full.sh
 
 You can run the full four-step pipeline (correlation → lineups → top1% →
-diversified portfolio) with the provided helper script:
+diversified portfolio → DKEntries fill) with the provided helper script:
 
 ```bash
 ./run_full.sh PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]
@@ -342,8 +342,10 @@ Where:
   (`none` or `multi`).
 - `STACK_WEIGHTS` (optional) are the multi-stack pattern weights passed through
   to `src.showdown_optimizer_main`.
-- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select;
-  it defaults to `NUM_LINEUPS` when omitted.
+- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select.
+  If provided explicitly, it is used as-is. When omitted, the script defaults
+  to the number of entries in the latest `DKEntries*.csv` under
+  `data/dkentries/`.
 
 The script will:
 
@@ -352,4 +354,7 @@ The script will:
 3. Estimate top 1% finish probabilities into `outputs/top1pct/`.
 4. Select a diversified subset of `DIVERSIFIED_NUM` lineups based on
    `top1_pct_finish_rate` and player-overlap constraints.
+5. Fill the latest DKEntries CSV template from `data/dkentries/` with the
+   selected diversified lineups, writing a DK-upload-ready CSV (with lineup
+   slots formatted as `{player_name} ({player_id})`) under `outputs/dkentries/`.
 
