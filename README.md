@@ -306,10 +306,17 @@ python -m src.flashback_sim \
 If `--contest-csv` or `--sabersim-csv` are omitted, the script will
 automatically pick the most recent `.csv` in the corresponding directory.
 
-If `--payouts-csv` is omitted, the script will look for a DraftKings payout JSON
-named `payouts-{contest_id}.json` under `data/payouts/`, where `{contest_id}`
-comes from the contest standings filename (e.g., `contest-standings-185418998.csv`
-→ `payouts-185418998.json`). The **Sim ROI** values are defined as:
+If `--payouts-csv` is omitted, the script will first look for a DraftKings payout
+JSON named `payouts-{contest_id}.json` under `data/payouts/`, where
+`{contest_id}` comes from the contest standings filename (e.g.,
+`contest-standings-185418998.csv` → `payouts-185418998.json`). If that file does
+not exist, `src.flashback_sim` will automatically call the DraftKings payouts
+endpoint
+`https://api.draftkings.com/contests/v1/contests/{contest_id}?format=json`,
+save the response to `data/payouts/payouts-{contest_id}.json`, and then use it
+for ROI computation. If the download fails (e.g., network error, non-200 HTTP
+status, or malformed JSON), the script falls back to skipping ROI computation as
+before. The **Sim ROI** values are defined as:
 
 \[
 \text{ROI} = \frac{\mathbb{E}[\text{payout}] - \text{entry fee}}{\text{entry fee}}

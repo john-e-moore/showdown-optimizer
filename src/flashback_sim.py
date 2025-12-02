@@ -34,6 +34,8 @@ or with explicit inputs:
 import argparse
 import json
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +48,60 @@ from . import build_corr_matrix_from_projections, config, simulation_corr
 
 
 FLASHBACK_SUBDIR = "flashback"
+DK_PAYOUT_URL_TEMPLATE = (
+    "https://api.draftkings.com/contests/v1/contests/{contest_id}?format=json"
+)
+
+
+def _download_payout_json(contest_id: str, dest_path: Path) -> bool:
+    """
+    Download payout JSON for a contest from DraftKings and write it to dest_path.
+
+    Returns:
+        True if the file was downloaded and written successfully; False otherwise.
+    """
+    url = DK_PAYOUT_URL_TEMPLATE.format(contest_id=contest_id)
+    print(f"Downloading DraftKings payout structure from {url} ...")
+
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            status = getattr(resp, "status", None)
+            if status is not None and status != 200:
+                print(
+                    f"Warning: DraftKings payout request for contest {contest_id} "
+                    f"returned HTTP status {status}; skipping ROI computation."
+                )
+                return False
+            data = resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(
+            f"Warning: Failed to download DraftKings payout JSON for contest {contest_id} "
+            f"from {url}: {exc}. Skipping ROI computation."
+        )
+        return False
+
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError as exc:
+        print(
+            f"Warning: Failed to parse DraftKings payout JSON for contest {contest_id} "
+            f"from {url}: {exc}. Skipping ROI computation."
+        )
+        return False
+
+    try:
+        with dest_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    except OSError as exc:
+        print(
+            f"Warning: Failed to write payout JSON to {dest_path}: {exc}. "
+            "Skipping ROI computation."
+        )
+        return False
+
+    print(f"Wrote DraftKings payout JSON to {dest_path}")
+    return True
 
 
 @dataclass
@@ -223,9 +279,14 @@ def _load_payout_structure(
         if not path.is_file():
             print(
                 f"Warning: No payout file found at inferred path {path}. "
-                "Skipping ROI computation."
+                "Attempting to download from DraftKings payouts API..."
             )
-            return None
+            if not _download_payout_json(str(contest_id), path):
+                print(
+                    "Warning: Failed to obtain payout file from DraftKings. "
+                    "Skipping ROI computation."
+                )
+                return None
 
     try:
         with path.open("r", encoding="utf-8") as f:
