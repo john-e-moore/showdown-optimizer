@@ -267,10 +267,67 @@ Typical choices:
 - Use `--max-overlap` between 3 and 5 to control how aggressively you diversify
   player combinations across the final portfolio.
 
+### Flashback contest simulation for completed Showdown contests
+
+You can analyze a **completed** DraftKings Showdown contest using the same
+correlation engine via `src.flashback_sim`. This script:
+
+- Loads a finished contest CSV from `data/contests/`.
+- Loads matching Sabersim projections from `data/sabersim/`.
+- Rebuilds a player correlation matrix from the Sabersim projections.
+- Simulates correlated DK scores for all players and scores every contest lineup.
+- Writes an Excel workbook under `outputs/flashback/` with:
+  - `Standings`: original contest CSV.
+  - `Simulation`: CPT/FLEX players, **Sim ROI**, Top 1% / Top 5% / Top 20% finish
+    rates, and average DK points per lineup (plus actual points/ROI when the
+    payout file is available).
+  - `Entrant summary`: average metrics across entries per entrant, including
+    **Avg. Sim ROI** when payouts are available.
+  - `Player summary`: draft rates and performance by role (CPT vs FLEX),
+    including **CPT Sim ROI** and **FLEX Sim ROI** when payouts are available.
+
+From the project root, if you have a contest CSV in `data/contests/` and a
+matching Sabersim CSV in `data/sabersim/`, you can run:
+
+```bash
+python -m src.flashback_sim
+```
+
+To specify the exact inputs and number of simulations:
+
+```bash
+python -m src.flashback_sim \
+  --contest-csv data/contests/my_contest.csv \
+  --sabersim-csv data/sabersim/my_slate.csv \
+  --num-sims 20000 \
+  --payouts-csv data/payouts/payouts-123456789.json
+```
+
+If `--contest-csv` or `--sabersim-csv` are omitted, the script will
+automatically pick the most recent `.csv` in the corresponding directory.
+
+If `--payouts-csv` is omitted, the script will first look for a DraftKings payout
+JSON named `payouts-{contest_id}.json` under `data/payouts/`, where
+`{contest_id}` comes from the contest standings filename (e.g.,
+`contest-standings-185418998.csv` → `payouts-185418998.json`). If that file does
+not exist, `src.flashback_sim` will automatically call the DraftKings payouts
+endpoint
+`https://api.draftkings.com/contests/v1/contests/{contest_id}?format=json`,
+save the response to `data/payouts/payouts-{contest_id}.json`, and then use it
+for ROI computation. If the download fails (e.g., network error, non-200 HTTP
+status, or malformed JSON), the script falls back to skipping ROI computation as
+before. The **Sim ROI** values are defined as:
+
+\[
+\text{ROI} = \frac{\mathbb{E}[\text{payout}] - \text{entry fee}}{\text{entry fee}}
+\]
+
+so `0.5` means +50% ROI and negative values mean losing money on average.
+
 ### End-to-end pipeline with run_full.sh
 
 You can run the full four-step pipeline (correlation → lineups → top1% →
-diversified portfolio) with the provided helper script:
+diversified portfolio → DKEntries fill) with the provided helper script:
 
 ```bash
 ./run_full.sh PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]
@@ -285,8 +342,15 @@ Where:
   (`none` or `multi`).
 - `STACK_WEIGHTS` (optional) are the multi-stack pattern weights passed through
   to `src.showdown_optimizer_main`.
+<<<<<<< HEAD
 - `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select;
   it defaults to `NUM_LINEUPS` when omitted.
+=======
+- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select.
+  If provided explicitly, it is used as-is. When omitted, the script defaults
+  to the number of entries in the latest `DKEntries*.csv` under
+  `data/dkentries/`.
+>>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
 
 The script will:
 
@@ -295,4 +359,10 @@ The script will:
 3. Estimate top 1% finish probabilities into `outputs/top1pct/`.
 4. Select a diversified subset of `DIVERSIFIED_NUM` lineups based on
    `top1_pct_finish_rate` and player-overlap constraints.
+<<<<<<< HEAD
+=======
+5. Fill the latest DKEntries CSV template from `data/dkentries/` with the
+   selected diversified lineups, writing a DK-upload-ready CSV (with lineup
+   slots formatted as `{player_name} ({player_id})`) under `outputs/dkentries/`.
+>>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
 

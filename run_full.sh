@@ -42,11 +42,21 @@ fi
 
 SABERSIM_CSV="$1"
 FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-100}"
+NUM_LINEUPS="${3:-1000}"
 SALARY_CAP="${4:-50000}"
-STACK_MODE="${5:-none}"
+STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
-DIVERSIFIED_NUM="${7:-17}"
+
+# If a 7th argument is provided, treat it as an explicit override for the
+# number of diversified lineups to select. Otherwise, default to the number
+# of actual entries in the latest DKEntries*.csv under data/dkentries/.
+DIVERSIFIED_NUM_CLI="${7-}"
+if [[ -n "${DIVERSIFIED_NUM_CLI}" ]]; then
+  DIVERSIFIED_NUM="${DIVERSIFIED_NUM_CLI}"
+else
+  echo "Resolving diversified lineup count from latest DKEntries CSV..."
+  DIVERSIFIED_NUM="$(python -m src.dkentries_utils --count-entries)"
+fi
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
   echo "Error: Sabersim CSV not found at '${SABERSIM_CSV}'" >&2
@@ -119,6 +129,23 @@ python -m src.diversify_lineups \
   --max-overlap 4
 
 echo
+<<<<<<< HEAD
+=======
+echo "================================================================"
+echo "Step 5: Filling DKEntries CSV with diversified lineups"
+echo "         Using latest DKEntries template under data/dkentries/"
+echo "         Writing DK-upload-ready CSV under outputs/dkentries/"
+echo "================================================================"
+
+OUTPUT_DKENTRIES_DIR="outputs/dkentries"
+mkdir -p "${OUTPUT_DKENTRIES_DIR}"
+OUTPUT_DKENTRIES_CSV="${OUTPUT_DKENTRIES_DIR}/DKEntries_${timestamp}.csv"
+
+python -m src.fill_dkentries \
+  --output-csv "${OUTPUT_DKENTRIES_CSV}"
+
+echo
+>>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
 echo "All steps completed."
 
 
