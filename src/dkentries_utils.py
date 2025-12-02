@@ -11,6 +11,7 @@ This module provides helpers to:
 """
 
 import argparse
+import csv
 from pathlib import Path
 from typing import Optional
 
@@ -58,16 +59,31 @@ def count_real_entries(path: Path) -> int:
 
     We treat any row with a non-empty `Entry ID` as a real entry.
     """
-    df = pd.read_csv(path)
-    if ENTRY_ID_COLUMN not in df.columns:
-        raise KeyError(
-            f"DKEntries CSV at {path} is missing required column "
-            f"{ENTRY_ID_COLUMN!r}."
-        )
+    # Use the csv module to tolerate rows with a variable number of fields.
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return 0
 
-    entry_id_series = df[ENTRY_ID_COLUMN]
-    mask = entry_id_series.notna() & (entry_id_series.astype(str).str.strip() != "")
-    return int(mask.sum())
+        try:
+            idx_entry_id = header.index(ENTRY_ID_COLUMN)
+        except ValueError as exc:
+            raise KeyError(
+                f"DKEntries CSV at {path} is missing required column "
+                f"{ENTRY_ID_COLUMN!r}."
+            ) from exc
+
+        count = 0
+        for row in reader:
+            if idx_entry_id >= len(row):
+                continue
+            val = str(row[idx_entry_id]).strip()
+            if val:
+                count += 1
+
+    return count
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:

@@ -16,6 +16,7 @@ This script:
 """
 
 import argparse
+import csv
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,13 +55,17 @@ def _find_mapping_columns(df: pd.DataFrame) -> Tuple[str, str, str]:
     id_col: Optional[str] = None
     roster_pos_col: Optional[str] = None
 
-    for col in df.columns:
-        series = df[col].astype(str)
-        if (series == "Name").any() and name_col is None:
+    # Use position-based indexing + NumPy to avoid pandas' ambiguous truth-value
+    # behaviour when dealing with duplicate column names or non-standard dtypes.
+    for j, col in enumerate(df.columns):
+        series = df.iloc[:, j].astype(str)
+        values = series.to_numpy()
+
+        if name_col is None and (values == "Name").any():
             name_col = col
-        if (series == "ID").any() and id_col is None:
+        if id_col is None and (values == "ID").any():
             id_col = col
-        if (series == "Roster Position").any() and roster_pos_col is None:
+        if roster_pos_col is None and (values == "Roster Position").any():
             roster_pos_col = col
 
     missing = [lbl for lbl, col in [("Name", name_col), ("ID", id_col), ("Roster Position", roster_pos_col)] if col is None]
@@ -376,7 +381,26 @@ def run(
     print(f"Using diversified lineups workbook: {diversified_path}")
     print(f"Loaded {len(records)} diversified lineups.")
 
-    dk_df = pd.read_csv(dkentries_path)
+    # Read DKEntries with csv first to tolerate variable-width rows (entry rows
+    # plus a wider player dictionary block), then promote to a DataFrame with
+    # padded columns.
+    with dkentries_path.open("r", encoding="utf-8", newline="") as f:
+        reader = list(csv.reader(f))
+
+    if not reader:
+        raise ValueError(f"DKEntries CSV at {dkentries_path} is empty.")
+
+    header = reader[0]
+    max_len = max(len(row) for row in reader)
+    extra_cols = [f"__extra_{i}" for i in range(max_len - len(header))]
+    columns = header + extra_cols
+
+    rows_padded: List[List[str]] = []
+    for row in reader[1:]:
+        padded = list(row) + [""] * (max_len - len(row))
+        rows_padded.append(padded)
+
+    dk_df = pd.DataFrame(rows_padded, columns=columns)
     slot_cols = _get_lineup_slot_columns(dk_df)
     name_role_to_id = _build_name_role_to_id_map(dk_df)
 
