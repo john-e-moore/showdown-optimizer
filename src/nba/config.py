@@ -67,14 +67,15 @@ SIM_N_GAMES: Final[int] = 5000
 # Random seed for the simulator (set to None to use nondeterministic seed).
 SIM_RANDOM_SEED: Final[int | None] = 42
 
-# Dirichlet concentration parameter controlling how tightly per-team DK point
-# shares cluster around their projected shares. Higher values => lower
-# variance around projections.
-SIM_DIRICHLET_K_DK_POINTS: Final[float] = 50.0
-
-# Small epsilon used when guarding against division by zero in share
-# computations.
-SIM_EPS: Final[float] = 1e-9
+# Optional coupling between players within the same game / team. These control
+# the log-variance of game-level and team-level multipliers applied to stat
+# means before sampling. Larger values induce stronger co-movement (higher
+# correlations) but also increase DK variance.
+#
+# If both are set to 0.0, the simulator falls back to independent per-player
+# Poisson draws around the Sabersim expectations.
+NBA_SIM_GAME_VAR: Final[float] = 0.04  # roughly sigma_game ~= 0.2
+NBA_SIM_TEAM_VAR: Final[float] = 0.01  # roughly sigma_team ~= 0.1
 
 
 def ensure_directories() -> None:

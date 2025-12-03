@@ -48,6 +48,54 @@ def _get_projection_values(df: pd.DataFrame, col: str) -> np.ndarray:
     return np.maximum(vals, 0.0)
 
 
+def _build_game_and_team_indices(
+    df: pd.DataFrame,
+) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """
+    Build integer game and team indices for each player row.
+
+    Games are identified by unordered {Team, Opp} pairs so that both sides of
+    a matchup share the same game id. Teams are identified by the `Team`
+    column alone.
+    """
+    if sabersim_parser.SABERSIM_TEAM_COL not in df.columns:
+        raise KeyError(
+            f"Sabersim dataframe missing Team column "
+            f"'{sabersim_parser.SABERSIM_TEAM_COL}'."
+        )
+
+    teams = df[sabersim_parser.SABERSIM_TEAM_COL].astype(str).to_numpy()
+    if "Opp" in df.columns:
+        opps = df["Opp"].astype(str).to_numpy()
+    else:
+        # Fallback: treat each team as its own \"game\" when Opp is unavailable.
+        opps = teams.copy()
+
+    n_players = len(df)
+    game_ids = np.empty(n_players, dtype=int)
+    team_ids = np.empty(n_players, dtype=int)
+
+    game_key_to_id: Dict[Tuple[str, str], int] = {}
+    team_to_id: Dict[str, int] = {}
+
+    for i in range(n_players):
+        team = teams[i]
+        opp = opps[i]
+        # Unordered key so (OKC, GSW) and (GSW, OKC) map to the same game.
+        key = tuple(sorted({team, opp}))
+        if key not in game_key_to_id:
+            game_key_to_id[key] = len(game_key_to_id)
+        game_ids[i] = game_key_to_id[key]
+
+        if team not in team_to_id:
+            team_to_id[team] = len(team_to_id)
+        team_ids[i] = team_to_id[team]
+
+    n_games = len(game_key_to_id)
+    n_teams = len(team_to_id)
+    return game_ids, team_ids, n_games, n_teams
+
+
 def simulate_nba_stats_from_projections(
     sabersim_df: pd.DataFrame,
     n_sims: int,
@@ -91,19 +139,71 @@ def simulate_nba_stats_from_projections(
     mu_tov = _get_projection_values(df, COL_TOV)
     mu_fg3 = _get_projection_values(df, COL_FG3M)
 
-    def _poisson_samples(mu: np.ndarray) -> np.ndarray:
-        # Shape (n_sims, n_players) → transpose to (n_players, n_sims).
+    # Optionally apply game/team coupling if configured; otherwise fall back
+    # to independent per-player Poisson draws.
+    game_var = getattr(config, "NBA_SIM_GAME_VAR", 0.0)
+    team_var = getattr(config, "NBA_SIM_TEAM_VAR", 0.0)
+
+    def _independent_poisson(mu: np.ndarray) -> np.ndarray:
         sims = rng.poisson(lam=mu[None, :], size=(n_sims, n_players))
         return sims.T.astype(float)
 
+    if game_var <= 0.0 and team_var <= 0.0:
+        stats: Dict[str, np.ndarray] = {
+            "pts": _independent_poisson(mu_pts),
+            "reb": _independent_poisson(mu_reb),
+            "ast": _independent_poisson(mu_ast),
+            "stl": _independent_poisson(mu_stl),
+            "blk": _independent_poisson(mu_blk),
+            "tov": _independent_poisson(mu_tov),
+            "fg3m": _independent_poisson(mu_fg3),
+        }
+        return player_names, stats
+
+    # Build game/team indices so we can apply shared multipliers.
+    game_ids, team_ids, n_games, n_teams = _build_game_and_team_indices(df)
+
+    # Lognormal game-level factors with mean 1.0.
+    sigma_game = float(game_var) ** 0.5
+    if sigma_game > 0.0:
+        mu_log_game = -0.5 * sigma_game * sigma_game
+        z_game = rng.normal(
+            loc=mu_log_game, scale=sigma_game, size=(n_games, n_sims)
+        )
+        game_factors = np.exp(z_game)
+    else:
+        game_factors = np.ones((n_games, n_sims), dtype=float)
+
+    # Lognormal team-level factors with mean 1.0.
+    sigma_team = float(team_var) ** 0.5
+    if sigma_team > 0.0:
+        mu_log_team = -0.5 * sigma_team * sigma_team
+        z_team = rng.normal(
+            loc=mu_log_team, scale=sigma_team, size=(n_teams, n_sims)
+        )
+        team_factors = np.exp(z_team)
+    else:
+        team_factors = np.ones((n_teams, n_sims), dtype=float)
+
+    # Combined multiplier per player and simulation.
+    # game_factors[game_ids] -> (n_players, n_sims)
+    # team_factors[team_ids] -> (n_players, n_sims)
+    m_player = game_factors[game_ids] * team_factors[team_ids]
+
+    def _coupled_poisson(mu: np.ndarray) -> np.ndarray:
+        # Scale each player's mean by the game/team multiplier.
+        lam = mu[:, None] * m_player
+        sims = rng.poisson(lam=lam)
+        return sims.astype(float)
+
     stats: Dict[str, np.ndarray] = {
-        "pts": _poisson_samples(mu_pts),
-        "reb": _poisson_samples(mu_reb),
-        "ast": _poisson_samples(mu_ast),
-        "stl": _poisson_samples(mu_stl),
-        "blk": _poisson_samples(mu_blk),
-        "tov": _poisson_samples(mu_tov),
-        "fg3m": _poisson_samples(mu_fg3),
+        "pts": _coupled_poisson(mu_pts),
+        "reb": _coupled_poisson(mu_reb),
+        "ast": _coupled_poisson(mu_ast),
+        "stl": _coupled_poisson(mu_stl),
+        "blk": _coupled_poisson(mu_blk),
+        "tov": _coupled_poisson(mu_tov),
+        "fg3m": _coupled_poisson(mu_fg3),
     }
 
     return player_names, stats

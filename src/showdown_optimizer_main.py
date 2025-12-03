@@ -237,7 +237,7 @@ def main() -> None:
 
     csv_path = matches[0]
 
-    # Load players for ownership/opponent metadata.
+    # Load players for ownership/opponent metadata and optimization.
     player_pool = load_players_from_sabersim(csv_path)
     players_by_id = {p.player_id: p for p in player_pool.players}
     # All distinct teams present in the slate (used for both stack modes and
@@ -254,7 +254,7 @@ def main() -> None:
 
     if args.stack_mode == "none":
         lineups = optimize_showdown_lineups(
-            projections_path_pattern=csv_path,
+            player_pool=player_pool,
             num_lineups=args.num_lineups,
             salary_cap=args.salary_cap,
             constraint_builders=constraint_builders,
@@ -294,7 +294,7 @@ def main() -> None:
             ]
 
             pattern_lineups = optimize_showdown_lineups(
-                projections_path_pattern=csv_path,
+                player_pool=player_pool,
                 num_lineups=n,
                 salary_cap=args.salary_cap,
                 constraint_builders=pattern_constraint_builders,
