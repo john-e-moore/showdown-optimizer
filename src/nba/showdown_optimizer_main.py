@@ -50,10 +50,10 @@ def _format_lineup(lineup: Lineup, idx: int) -> str:
         f"salary={cpt.cpt_salary:5d} proj={1.5 * cpt.dk_proj:6.2f}"
     )
 
-    # FLEX players in order
+    # UTIL players in order for NBA Showdown
     for p in lineup.flex:
         lines.append(
-            f"  FLEX | {p.name:25s} {p.team:3s} {p.position:4s} "
+            f"  UTIL | {p.name:25s} {p.team:3s} {p.position:4s} "
             f"salary={p.dk_salary:5d} proj={p.dk_proj:6.2f}"
         )
 
@@ -363,7 +363,7 @@ def main() -> None:
     else:
         opp_map = {t: "" for t in teams}
 
-    # Build exposure table based on how often each player appears in CPT/FLEX.
+    # Build exposure table based on how often each player appears in CPT/UTIL.
     exposure_rows = []
     for p in player_pool.players:
         pid = p.player_id
@@ -407,9 +407,9 @@ def main() -> None:
         """
         return float(value)
 
-    # For each (Name, Team) pair, identify CPT vs FLEX rows by projection:
+    # For each (Name, Team) pair, identify CPT vs flex-style rows by projection:
     #   - Larger 'My Proj' => CPT row
-    #   - Other row => FLEX row
+    #   - Other row => flex-style row
     ownership_rows = []
     player_cpt_own_pct_by_id: dict[str, float] = {}
     player_flex_own_pct_by_id: dict[str, float] = {}
@@ -489,7 +489,7 @@ def main() -> None:
         }
         for j, p in enumerate(lineup.flex, start=1):
             col_name = f"flex{j}"
-            row[col_name] = fmt_player_with_own(p.player_id, slot="FLEX")
+            row[col_name] = fmt_player_with_own(p.player_id, slot="UTIL")
 
         lineup_rows.append(row)
 

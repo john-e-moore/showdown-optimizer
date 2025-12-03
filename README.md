@@ -77,9 +77,9 @@ By default this will:
 2. Run `SIM_N_GAMES` Monte Carlo simulations of team-level stat pools and
    allocate them to players using Dirichlet/multinomial sampling.
 3. Compute the empirical correlation matrix of DK fantasy points across all
-   FLEX players in that slate.
+   flex-style players in that slate.
 4. Write an Excel file to `config.OUTPUT_CORR_EXCEL` with:
-   - Sheet `Sabersim_Projections`: FLEX-only Sabersim projections.
+   - Sheet `Sabersim_Projections`: flex-style Sabersim projections.
    - Sheet `Correlation_Matrix`: symmetric correlation matrix with
      player names as both rows and columns.
 
@@ -105,7 +105,7 @@ python -m src.showdown_optimizer_main \
 
 This will:
 - Load Sabersim projections from the CSV matched by `--sabersim-glob`.
-- Build valid DraftKings Showdown lineups (1 CPT, 5 FLEX, 6 distinct players).
+- Build valid DraftKings Showdown lineups (1 CPT, 5 flex-style slots, 6 distinct players).
 - Maximize mean projected DK fantasy points under the given salary cap.
 
 You can also control how many lineups are solved per MILP model using the
@@ -222,8 +222,8 @@ You can optionally tune the calibration of the field distribution:
   mean field score; values near `1` use the raw variance.
 - `--field-z`: z-score applied to the (shrunken) field standard deviation
   (default `2.0`, slightly below the canonical 99th percentile `2.326`).
-- `--flex-var-factor`: effective variance factor for the aggregate FLEX
-  component (default `3.5`, vs. `5.0` for five independent FLEX slots).
+- `--flex-var-factor`: effective variance factor for the aggregate flex-style
+  component (default `3.5`, vs. `5.0` for five independent flex-style slots).
 
 These knobs are intended to produce **realistic relative rankings** of lineups
 by top-1% finish probability (e.g., best lineups a few percent, weakest near
@@ -252,7 +252,7 @@ This will:
 - Load the most recent `.xlsx` in `outputs/top1pct/` and read the
   `Lineups_Top1Pct` sheet.
 - Keep only lineups with `top1_pct_finish_rate >= min-top1-pct`.
-- Represent each lineup as the set of its six players (CPT + 5 FLEX).
+- Represent each lineup as the set of its six players (CPT + 5 flex-style slots).
 - Greedily select up to `--num-lineups` lineups in descending
   `top1_pct_finish_rate` (breaking ties by `lineup_projection` when available),
   only accepting a lineup if its overlap with every already-selected lineup is
@@ -278,13 +278,13 @@ correlation engine via `src.flashback_sim`. This script:
 - Simulates correlated DK scores for all players and scores every contest lineup.
 - Writes an Excel workbook under `outputs/flashback/` with:
   - `Standings`: original contest CSV.
-  - `Simulation`: CPT/FLEX players, **Sim ROI**, Top 1% / Top 5% / Top 20% finish
-    rates, and average DK points per lineup (plus actual points/ROI when the
-    payout file is available).
+  - `Simulation`: CPT plus flex-style players, **Sim ROI**, Top 1% / Top 5% /
+    Top 20% finish rates, and average DK points per lineup (plus actual
+    points/ROI when the payout file is available).
   - `Entrant summary`: average metrics across entries per entrant, including
     **Avg. Sim ROI** when payouts are available.
-  - `Player summary`: draft rates and performance by role (CPT vs FLEX),
-    including **CPT Sim ROI** and **FLEX Sim ROI** when payouts are available.
+  - `Player summary`: draft rates and performance by role (CPT vs flex-style),
+    including **CPT Sim ROI** and flex-style Sim ROI when payouts are available.
 
 From the project root, if you have a contest CSV in `data/contests/` and a
 matching Sabersim CSV in `data/sabersim/`, you can run:

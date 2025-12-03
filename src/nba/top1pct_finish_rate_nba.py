@@ -98,8 +98,8 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=float,
         default=3.5,
         help=(
-            "Effective variance factor for the aggregate FLEX component "
-            "(<= 5.0; default: 3.5)."
+            "Effective variance factor for the aggregate non-CPT flex-style "
+            "component (<= 5.0; default: 3.5)."
         ),
     )
     parser.add_argument(

@@ -104,7 +104,7 @@ def _load_corr_workbook(
     Load Sabersim projections and correlation matrix from a correlation workbook.
 
     Returns:
-        sabersim_proj_df: FLEX-only Sabersim projections.
+        sabersim_proj_df: flex-style Sabersim projections (non-CPT slots).
         corr_df: square correlation matrix with player names as index/columns.
     """
     xls = pd.ExcelFile(path)
@@ -155,7 +155,7 @@ def _build_player_universe(
         mu: DK point means (shape P).
         sigma: DK point standard deviations (shape P).
         cpt_own: CPT ownership fractions (shape P).
-        flex_own: FLEX ownership fractions (shape P).
+        flex_own: flex-style ownership fractions (shape P).
         positions: string position labels (shape P).
     """
     # Players from correlation matrix.
@@ -230,7 +230,7 @@ def _build_player_universe(
         )
     lineups_proj_df["Name"] = lineups_proj_df["Name"].astype(str)
     lineups_proj_df["Team"] = lineups_proj_df["Team"].astype(str)
-    # Keep lowest-salary row per (Name, Team) as FLEX-equivalent.
+    # Keep lowest-salary row per (Name, Team) as flex-style (non-CPT) equivalent.
     lineups_proj_df = (
         lineups_proj_df.sort_values(
             by=["Name", "Team", "Salary"], ascending=[True, True, True]
@@ -424,10 +424,15 @@ def _compute_field_thresholds(
     """
     Compute approximate 99th percentile thresholds of the field score distribution.
 
+    This models the field as a mixture of CPT and flex-style roster slots. The
+    flex component is scaled by ``flex_var_factor`` to calibrate its variance,
+    regardless of whether those slots are labelled FLEX (NFL) or UTIL (NBA)
+    in downstream DraftKings artifacts.
+
     Args:
         X: player DK scores, shape (S, P).
         cpt_own: CPT ownership fractions, shape (P,).
-        flex_own: FLEX ownership fractions, shape (P,).
+        flex_own: flex-style ownership fractions aggregated over non-CPT slots.
 
     Returns:
         thresholds: array of shape (S,) with per-simulation 99th percentile scores.
@@ -443,17 +448,17 @@ def _compute_field_thresholds(
     var_C = mC2 - mu_C**2
     var_C = np.clip(var_C, a_min=0.0, a_max=None)
 
-    # FLEX mixture: per-slot distribution, nominally 5 slots but with an
+    # Flex-style mixture: per-slot distribution, nominally 5 slots but with an
     # optional variance calibration factor to soften the tail.
     pi = flex_own / 5.0
-    flex_scores = X  # DK points at FLEX are just X.
+    flex_scores = X  # DK points at non-CPT flex-style slots are just X.
     mu_F = flex_scores @ pi
     mF2 = (flex_scores ** 2) @ pi
     var_F = mF2 - mu_F**2
     var_F = np.clip(var_F, a_min=0.0, a_max=None)
 
     mu_F_total = 5.0 * mu_F
-    # Calibrated FLEX variance factor k (<= 5.0 ideally).
+    # Calibrated flex-style variance factor k (<= 5.0 ideally).
     var_F_total = flex_var_factor * var_F
 
     mu_field = mu_C + mu_F_total
@@ -478,7 +483,7 @@ def _build_lineup_weights(
 
     Each row corresponds to a lineup:
       - CPT player has weight 1.5.
-      - Each FLEX player has weight 1.0 (weights add if duplicated).
+      - Each flex-style player has weight 1.0 (weights add if duplicated).
     """
     lineup_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
     missing_cols = [c for c in lineup_cols if c not in lineups_df.columns]
@@ -502,7 +507,7 @@ def _build_lineup_weights(
         else:
             W[k, idx] += 1.5
 
-        # FLEX slots
+        # Flex-style slots
         for col in [f"flex{j}" for j in range(1, 6)]:
             flex_name = _parse_player_name(row[col])
             idx = player_index.get(flex_name)
@@ -546,7 +551,8 @@ def run_top1pct(
         random_seed: Optional RNG seed; if None, use nondeterministic seed.
         field_var_shrink: Variance shrinkage factor for the modeled field.
         field_z_score: Z-score for the upper tail of the field distribution.
-        flex_var_factor: Effective variance factor for FLEX component.
+        flex_var_factor: Effective variance factor for the aggregate flex-style
+            component.
 
     Returns:
         Path to the written output Excel workbook.

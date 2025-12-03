@@ -37,6 +37,7 @@ def run(
         team_col=build_corr_matrix_from_projections.SABERSIM_TEAM_COL,
         salary_col=build_corr_matrix_from_projections.SABERSIM_SALARY_COL,
         dk_proj_col=build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL,
+        flex_role_label="FLEX",
     )
 
 

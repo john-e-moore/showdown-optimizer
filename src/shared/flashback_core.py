@@ -4,7 +4,7 @@ from __future__ import annotations
 Sport-agnostic flashback contest simulation core for completed Showdown slates.
 
 This module implements the heavy lifting for:
-  - Loading contest standings and parsing CPT/FLEX lineups.
+  - Loading contest standings and parsing CPT plus flex-style lineups.
   - Loading Sabersim projections and building a correlation matrix.
   - Simulating correlated DK scores for all players.
   - Scoring every contest lineup across simulations.
@@ -12,7 +12,7 @@ This module implements the heavy lifting for:
 
 It is parameterised by:
   - config_module: provides DATA_DIR, OUTPUTS_DIR, SABERSIM_DIR, SIM_RANDOM_SEED.
-  - load_sabersim_projections: function(path) -> FLEX-only Sabersim dataframe.
+  - load_sabersim_projections: function(path) -> flex-style Sabersim dataframe.
   - simulate_corr_matrix_from_projections: function(sabersim_df) -> corr_df.
 
 NFL and NBA wrappers should live in sport-specific modules and call
@@ -80,8 +80,8 @@ def _parse_lineup_string(lineup: str) -> Tuple[str, Tuple[str, str, str, str, st
     Parse a DraftKings Showdown lineup string into one CPT and five flex-role names.
 
     DraftKings uses ``CPT`` plus either ``FLEX`` (NFL) or ``UTIL`` (NBA) tokens
-    in the exported lineup strings; both FLEX and UTIL are treated as flex slots
-    here.
+    in the exported lineup strings; both FLEX and UTIL are treated as flex-style
+    slots here.
     """
     if not isinstance(lineup, str):
         raise ValueError(f"Lineup value is not a string: {lineup!r}")
@@ -130,8 +130,8 @@ def _parse_lineup_string(lineup: str) -> Tuple[str, Tuple[str, str, str, str, st
         raise ValueError(f"No CPT player found in lineup string: {lineup!r}")
     if len(flex_names) != 5:
         raise ValueError(
-            f"Expected 5 FLEX players in lineup string, found {len(flex_names)}: "
-            f"{lineup!r}"
+            "Expected 5 non-CPT (flex-style) players in lineup string, found "
+            f"{len(flex_names)}: {lineup!r}"
         )
 
     return cpt_name, (flex_names[0], flex_names[1], flex_names[2], flex_names[3], flex_names[4])
@@ -370,7 +370,7 @@ def _build_player_universe_and_weights(
     for k, pl in enumerate(parsed_lineups):
         # CPT weight 1.5
         W[k, player_index[pl.cpt]] += 1.5
-        # FLEX weights 1.0
+        # Flex-style weights 1.0
         for name in pl.flex:
             W[k, player_index[name]] += 1.0
 
@@ -624,7 +624,7 @@ def _build_sabersim_ownership_and_salary(
     proj_col: str,
 ) -> Dict[Tuple[str, str], Dict[str, float]]:
     """
-    Build CPT/FLEX ownership and salary mapping from the raw Sabersim CSV.
+    Build CPT / flex-style ownership and salary mapping from the raw Sabersim CSV.
     """
     required_cols = {name_col, team_col, salary_col, proj_col, "My Own"}
     missing = required_cols.difference(sabersim_raw_df.columns)
@@ -673,7 +673,7 @@ def _build_projected_ownership_by_player(
     ownership_salary_by_name_team: Dict[Tuple[str, str], Dict[str, float]],
 ) -> Dict[str, Dict[str, float]]:
     """
-    Aggregate projected CPT/FLEX ownership by player name across teams.
+    Aggregate projected CPT / flex-style ownership by player name across teams.
     """
     projected: Dict[str, Dict[str, float]] = {}
     for (name, _team), info in ownership_salary_by_name_team.items():
@@ -787,25 +787,28 @@ def _build_entrant_summary(
 def _build_player_summary(
     simulation_df: pd.DataFrame,
     projected_ownership_by_player: Dict[str, Dict[str, float]],
+    *,
+    flex_role_label: str,
 ) -> pd.DataFrame:
     """
     Build player-level summary statistics from per-lineup simulation results.
     """
     num_lineups = len(simulation_df)
     if num_lineups == 0:
+        flex_label_up = flex_role_label.upper()
         return pd.DataFrame(
             columns=[
                 "Player",
                 "CPT draft %",
                 "CPT proj ownership",
-                "FLEX draft %",
-                "FLEX proj ownership",
+                f"{flex_label_up} draft %",
+                f"{flex_label_up} proj ownership",
                 "CPT Sim ROI",
-                "FLEX Sim ROI",
+                f"{flex_label_up} Sim ROI",
                 "CPT top 1% rate",
-                "FLEX top 1% rate",
+                f"{flex_label_up} top 1% rate",
                 "CPT top 20% rate",
-                "FLEX top 20% rate",
+                f"{flex_label_up} top 20% rate",
             ]
         )
 
@@ -830,7 +833,7 @@ def _build_player_summary(
             records.append(
                 {
                     "Player": name,
-                    "role": "FLEX",
+                    "role": flex_role_label.upper(),
                     "Top 1%": top1,
                     "Top 20%": top20,
                     "Sim ROI": sim_roi,
@@ -840,8 +843,9 @@ def _build_player_summary(
     long_df = pd.DataFrame(records)
 
     # Draft percentages by role.
+    flex_label_up = flex_role_label.upper()
     cpt_counts = long_df[long_df["role"] == "CPT"]["Player"].value_counts()
-    flex_counts = long_df[long_df["role"] == "FLEX"]["Player"].value_counts()
+    flex_counts = long_df[long_df["role"] == flex_label_up]["Player"].value_counts()
 
     all_players = sorted(set(long_df["Player"].astype(str)))
     rows: List[Dict[str, object]] = []
@@ -854,7 +858,7 @@ def _build_player_summary(
         # Role-specific performance metrics.
         mask_player = long_df["Player"] == player
         sub_cpt = long_df[mask_player & (long_df["role"] == "CPT")]
-        sub_flex = long_df[mask_player & (long_df["role"] == "FLEX")]
+        sub_flex = long_df[mask_player & (long_df["role"] == flex_label_up)]
 
         def _safe_mean(series: pd.Series) -> float:
             return float(series.mean()) if not series.empty else 0.0
@@ -868,18 +872,20 @@ def _build_player_summary(
                 "Player": player,
                 "CPT draft %": cpt_draft,
                 "CPT proj ownership": float(proj.get("cpt_proj_own", 0.0)),
-                "FLEX draft %": flex_draft,
-                "FLEX proj ownership": float(proj.get("flex_proj_own", 0.0)),
+                f"{flex_label_up} draft %": flex_draft,
+                f"{flex_label_up} proj ownership": float(
+                    proj.get("flex_proj_own", 0.0)
+                ),
                 "CPT Sim ROI": _safe_mean(sub_cpt["Sim ROI"])
                 if "Sim ROI" in sub_cpt.columns
                 else 0.0,
-                "FLEX Sim ROI": _safe_mean(sub_flex["Sim ROI"])
+                f"{flex_label_up} Sim ROI": _safe_mean(sub_flex["Sim ROI"])
                 if "Sim ROI" in sub_flex.columns
                 else 0.0,
                 "CPT top 1% rate": _safe_mean(sub_cpt["Top 1%"]),
-                "FLEX top 1% rate": _safe_mean(sub_flex["Top 1%"]),
+                f"{flex_label_up} top 1% rate": _safe_mean(sub_flex["Top 1%"]),
                 "CPT top 20% rate": _safe_mean(sub_cpt["Top 20%"]),
-                "FLEX top 20% rate": _safe_mean(sub_flex["Top 20%"]),
+                f"{flex_label_up} top 20% rate": _safe_mean(sub_flex["Top 20%"]),
             }
         )
 
@@ -900,10 +906,18 @@ def run_flashback(
     team_col: str,
     salary_col: str,
     dk_proj_col: str,
+    flex_role_label: str = "FLEX",
 ) -> Path:
     """
     Execute the flashback contest simulation pipeline for a given sport.
+
+    Args:
+        flex_role_label: Label used for non-CPT lineup slots when producing
+            player-level summaries (e.g., \"FLEX\" for NFL, \"UTIL\" for NBA).
     """
+    # Normalize flex role label for downstream use.
+    flex_role_label_up = flex_role_label.upper()
+
     # Resolve input paths.
     contest_dir = config_module.DATA_DIR / "contests"
     sabersim_dir = config_module.SABERSIM_DIR
@@ -1176,7 +1190,9 @@ def run_flashback(
     # Entrant and player summaries.
     entrant_summary_df = _build_entrant_summary(simulation_df)
     player_summary_df = _build_player_summary(
-        simulation_df, projected_ownership_by_player
+        simulation_df,
+        projected_ownership_by_player,
+        flex_role_label=flex_role_label_up,
     )
 
     # Output path.

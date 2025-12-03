@@ -7,7 +7,7 @@ This module provides:
   - Resolving the latest DKEntries*.csv template under a given data root.
   - Counting real entries (rows with a non-empty Entry ID).
   - Parsing the embedded player dictionary (Name / ID / Roster Position).
-  - Identifying CPT + 5 FLEX slot columns.
+  - Identifying CPT + 5 flex-style slot columns.
   - Fee-aware assignment of diversified lineups to entries.
   - Applying assignments back to a DKEntries dataframe.
 """
@@ -157,7 +157,8 @@ def build_name_role_to_id_map(
     mask = df[roster_pos_col].astype(str).str.upper().isin(valid_roles)
     if not mask.any():
         raise ValueError(
-            "DKEntries CSV appears to be missing CPT/FLEX player dictionary rows."
+            "DKEntries CSV appears to be missing CPT/{flex_role_label} player "
+            "dictionary rows.".format(flex_role_label=flex_role_label_up)
         )
 
     mapping: Dict[Tuple[str, str], str] = {}
@@ -197,12 +198,12 @@ def build_name_role_to_id_map(
 
 def get_lineup_slot_columns(df: pd.DataFrame) -> List[int]:
     """
-    Identify the 6 contiguous columns corresponding to CPT + 5 FLEX slots.
+    Identify the 6 contiguous columns corresponding to CPT + 5 flex-style slots.
 
     We locate the first 'CPT' column and then take its positional index plus the
     next 5 indices. Returning positional indices (rather than column labels)
-    avoids pandas' ambiguous behaviour when there are duplicate column names
-    such as multiple 'FLEX' columns in the DKEntries template.
+    avoids pandas' ambiguous behaviour when there are duplicate slot column
+    names such as multiple flex-style columns (e.g., several 'FLEX' or 'UTIL').
     """
     cols = list(df.columns)
     try:
@@ -213,7 +214,7 @@ def get_lineup_slot_columns(df: pd.DataFrame) -> List[int]:
     if idx_cpt + 5 >= len(cols):
         raise ValueError(
             "DKEntries CSV does not appear to contain 6 lineup slot columns "
-            "(CPT + 5 FLEX)."
+            "(CPT plus 5 flex-style slots)."
         )
 
     # Return integer column indices for CPT followed by 5 FLEX slots.

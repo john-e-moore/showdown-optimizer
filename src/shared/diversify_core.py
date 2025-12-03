@@ -68,7 +68,7 @@ def _load_top1pct_lineups(
 
 def _build_player_set(row: pd.Series) -> FrozenSet[str]:
     """
-    Build a frozenset of player names for a lineup row (CPT + 5 FLEX).
+    Build a frozenset of player names for a lineup row (CPT + 5 flex-style slots).
     """
     cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
     names: List[str] = []
@@ -148,11 +148,12 @@ def _greedy_diversified_selection(
 
 def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute CPT / FLEX / total exposure across the diversified lineups.
+    Compute CPT / flex-style / total exposure across the diversified lineups.
 
     Exposure is reported as a percentage of selected lineups:
       - cpt_exposure: 100 * (# of lineups where player is CPT) / N
-      - flex_exposure: 100 * (# of lineups where player appears in any FLEX) / N
+      - flex_exposure: 100 * (# of lineups where player appears in any non-CPT
+        flex-style slot) / N
       - total_exposure: cpt_exposure + flex_exposure
     """
     if selected_df.empty:
@@ -179,7 +180,7 @@ def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
         cpt_name = _parse_player_name(row["cpt"])
         cpt_counts[cpt_name] += 1
 
-        # FLEX slots
+        # Flex-style slots
         for col in [f"flex{j}" for j in range(1, 6)]:
             flex_name = _parse_player_name(row[col])
             flex_counts[flex_name] += 1
