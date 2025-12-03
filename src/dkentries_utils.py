@@ -1,89 +1,38 @@
 from __future__ import annotations
 
 """
-Utilities for working with DraftKings DKEntries CSV templates.
+NFL-specific wrappers around shared DKEntries helpers.
 
-This module provides helpers to:
-  - Locate the latest DKEntries*.csv file under data/dkentries/.
-  - Count the number of actual entries (rows with a non-empty Entry ID).
-  - Expose a tiny CLI so shell scripts (e.g. run_full.sh) can query the
-    entry count.
+This module preserves the existing CLI interface while delegating the
+core DKEntries resolution/counting logic to `src.shared.dkentries_core`.
 """
 
 import argparse
-import csv
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
-
 from . import config
+from .shared import dkentries_core
 
 
-DKENTRIES_SUBDIR = "dkentries"
-DKENTRIES_PATTERN = "DKEntries*.csv"
-ENTRY_ID_COLUMN = "Entry ID"
+ENTRY_ID_COLUMN = dkentries_core.ENTRY_ID_COLUMN
 
 
 def resolve_latest_dkentries_csv(explicit: Optional[str] = None) -> Path:
     """
-    Resolve the path to a DKEntries CSV.
-
-    If `explicit` is provided, it is treated as a path (absolute or relative
-    to the project root) and must exist.
-
-    Otherwise, the most recent `DKEntries*.csv` under data/dkentries/ is used.
+    Resolve the path to a DKEntries CSV for NFL.
     """
-    if explicit:
-        path = Path(explicit)
-        if not path.is_file():
-            raise FileNotFoundError(f"Specified DKEntries CSV does not exist: {path}")
-        return path
-
-    dkentries_dir = config.DATA_DIR / DKENTRIES_SUBDIR
-    candidates = sorted(
-        dkentries_dir.glob(DKENTRIES_PATTERN),
-        key=lambda p: p.stat().st_mtime,
+    return dkentries_core.resolve_latest_dkentries_csv(
+        data_root=config.DATA_DIR,
+        explicit=explicit,
     )
-    if not candidates:
-        raise FileNotFoundError(
-            f"No DKEntries CSV files matching pattern {DKENTRIES_PATTERN!r} "
-            f"found under {dkentries_dir}"
-        )
-    return candidates[-1]
 
 
 def count_real_entries(path: Path) -> int:
     """
     Count the number of actual entries in a DKEntries CSV.
-
-    We treat any row with a non-empty `Entry ID` as a real entry.
     """
-    # Use the csv module to tolerate rows with a variable number of fields.
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return 0
-
-        try:
-            idx_entry_id = header.index(ENTRY_ID_COLUMN)
-        except ValueError as exc:
-            raise KeyError(
-                f"DKEntries CSV at {path} is missing required column "
-                f"{ENTRY_ID_COLUMN!r}."
-            ) from exc
-
-        count = 0
-        for row in reader:
-            if idx_entry_id >= len(row):
-                continue
-            val = str(row[idx_entry_id]).strip()
-            if val:
-                count += 1
-
-    return count
+    return dkentries_core.count_real_entries(path)
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
