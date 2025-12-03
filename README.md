@@ -372,6 +372,10 @@ The NBA side mirrors the NFL layout with:
 - `outputs/nba/dkentries/`: Filled NBA DKEntries CSVs.
 - `outputs/nba/flashback/`: NBA flashback analysis workbooks.
 
+Note: DraftKings NFL DKEntries use `CPT`/`FLEX` roster roles, while NBA
+DKEntries use `CPT`/`UTIL`. The shared DKEntries helpers handle this
+difference automatically (NFL uses `FLEX`, NBA uses `UTIL` for flex slots).
+
 Key NBA entrypoints:
 
 - Correlations: `python -m src.nba.main --sabersim-csv ... --output-excel ...`

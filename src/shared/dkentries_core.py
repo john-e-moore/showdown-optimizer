@@ -136,16 +136,25 @@ def _find_mapping_columns(df: pd.DataFrame) -> Tuple[str, str, str]:
     return name_col, id_col, roster_pos_col
 
 
-def build_name_role_to_id_map(df: pd.DataFrame) -> Dict[Tuple[str, str], str]:
+def build_name_role_to_id_map(
+    df: pd.DataFrame,
+    *,
+    flex_role_label: str = "FLEX",
+) -> Dict[Tuple[str, str], str]:
     """
     Build a mapping (player_name, roster_role) -> dk_player_id using the
     embedded player dictionary in the DKEntries CSV.
 
-    roster_role is one of {"CPT", "FLEX"}.
+    By default this treats CPT plus FLEX rows as valid dictionary entries.
+    For sports like NBA where DraftKings uses a different label (e.g. ``UTIL``)
+    for non-CPT lineup slots, pass ``flex_role_label=\"UTIL\"``.
     """
     name_col, id_col, roster_pos_col = _find_mapping_columns(df)
 
-    mask = df[roster_pos_col].isin(["CPT", "FLEX"])
+    flex_role_label_up = flex_role_label.upper()
+    valid_roles = {"CPT", flex_role_label_up}
+
+    mask = df[roster_pos_col].astype(str).str.upper().isin(valid_roles)
     if not mask.any():
         raise ValueError(
             "DKEntries CSV appears to be missing CPT/FLEX player dictionary rows."
@@ -164,7 +173,7 @@ def build_name_role_to_id_map(df: pd.DataFrame) -> Dict[Tuple[str, str], str]:
         role = str(roster_role).strip().upper()
         player_id = str(raw_id).strip()
 
-        if not name or not player_id or role not in {"CPT", "FLEX"}:
+        if not name or not player_id or role not in valid_roles:
             continue
 
         key = (name, role)
@@ -350,10 +359,16 @@ def apply_assignments_to_dkentries(
     slot_cols: Sequence[int],
     assignment: Mapping[int, LineupRecord],
     name_role_to_id: Mapping[Tuple[str, str], str],
+    *,
+    flex_role_label: str = "FLEX",
 ) -> pd.DataFrame:
     """
-    Overwrite CPT/FLEX columns in dk_df with assigned lineups, formatting
-    each cell as '{player_name} ({player_id})'.
+    Overwrite CPT / flex-style columns in ``dk_df`` with assigned lineups,
+    formatting each cell as ``\"{player_name} ({player_id})\"``.
+
+    The first slot in ``slot_cols`` is always treated as ``CPT``; all remaining
+    slots use ``flex_role_label`` (\"FLEX\" for NFL, \"UTIL\" for NBA, etc.)
+    when looking up player IDs in ``name_role_to_id``.
     """
     result = dk_df.copy()
 
@@ -363,7 +378,7 @@ def apply_assignments_to_dkentries(
 
         for j, col_idx in enumerate(slot_cols):
             name = rec.players[j]
-            role = "CPT" if j == 0 else "FLEX"
+            role = "CPT" if j == 0 else flex_role_label
             key = (name, role)
             if key not in name_role_to_id:
                 raise KeyError(

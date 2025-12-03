@@ -77,13 +77,18 @@ def _clean_entrant_name(entry_name: str) -> str:
 
 def _parse_lineup_string(lineup: str) -> Tuple[str, Tuple[str, str, str, str, str]]:
     """
-    Parse a DraftKings Showdown lineup string into CPT and five FLEX names.
+    Parse a DraftKings Showdown lineup string into one CPT and five flex-role names.
+
+    DraftKings uses ``CPT`` plus either ``FLEX`` (NFL) or ``UTIL`` (NBA) tokens
+    in the exported lineup strings; both FLEX and UTIL are treated as flex slots
+    here.
     """
     if not isinstance(lineup, str):
         raise ValueError(f"Lineup value is not a string: {lineup!r}")
 
     tokens = lineup.split()
-    roles = {"CPT", "FLEX"}
+    # Accept both FLEX and UTIL as flex-style roles.
+    roles = {"CPT", "FLEX", "UTIL"}
 
     current_role: str | None = None
     current_name_tokens: List[str] = []
@@ -103,7 +108,8 @@ def _parse_lineup_string(lineup: str) -> Tuple[str, Tuple[str, str, str, str, st
                     f"Multiple CPT players found in lineup string: {lineup!r}"
                 )
             cpt_name = name
-        elif current_role == "FLEX":
+        else:
+            # Any non-CPT role token (FLEX, UTIL, etc.) is treated as a flex slot.
             flex_names.append(name)
         current_role = None
         current_name_tokens = []
@@ -152,9 +158,17 @@ def _load_contest_lineups(contest_csv: Path) -> Tuple[pd.DataFrame, List[ParsedL
     parsed: List[ParsedLineup] = []
     for _, row in standings_df.iterrows():
         entry_name_raw = row["EntryName"]
-        lineup_str = row["Lineup"]
+        lineup_val = row["Lineup"]
+
+        # Some rows may not have a valid lineup string (NaN/blank); skip them.
+        if pd.isna(lineup_val):
+            continue
+        lineup_str = str(lineup_val)
+        if not lineup_str.strip():
+            continue
+
         entrant = _clean_entrant_name(str(entry_name_raw))
-        cpt, flex = _parse_lineup_string(str(lineup_str))
+        cpt, flex = _parse_lineup_string(lineup_str)
         parsed.append(
             ParsedLineup(
                 entrant=entrant,

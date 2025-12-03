@@ -28,7 +28,8 @@ LINEUPS_DIVERSIFIED_SHEET = "Lineups_Diversified"
 @dataclass(frozen=True)
 class LineupRecord:
     idx: int
-    players: Tuple[str, ...]  # CPT first, then FLEX1..FLEX5
+    # players are stored as [CPT, UTIL1..UTIL5] for NBA Showdown
+    players: Tuple[str, ...]
     strength: float
 
 
@@ -194,7 +195,10 @@ def run(
 
     dk_df = pd.DataFrame(rows_padded, columns=columns)
     slot_cols = dkentries_core.get_lineup_slot_columns(dk_df)
-    name_role_to_id = dkentries_core.build_name_role_to_id_map(dk_df)
+    # NBA DKEntries use CPT / UTIL roster positions rather than CPT / FLEX.
+    name_role_to_id = dkentries_core.build_name_role_to_id_map(
+        dk_df, flex_role_label="UTIL"
+    )
 
     # Convert local LineupRecord objects to shared core LineupRecord for reuse.
     shared_records = [
@@ -208,6 +212,7 @@ def run(
         slot_cols=slot_cols,
         assignment=assignment,
         name_role_to_id=name_role_to_id,
+        flex_role_label="UTIL",
     )
 
     outputs_root = config.OUTPUTS_DIR / "dkentries"
