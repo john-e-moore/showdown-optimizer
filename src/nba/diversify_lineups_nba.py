@@ -1,27 +1,17 @@
 from __future__ import annotations
 
 """
-Post-process Showdown lineups with top 1% finish rates to select a diversified
-subset of X lineups.
+NBA wrapper for diversifying Showdown top1pct lineups.
 
-This module:
-  1. Loads the latest top1pct workbook from outputs/top1pct/*.xlsx (or a
-     user-specified workbook path).
-  2. Filters to lineups with top1_pct_finish_rate >= min_top1_pct.
-  3. Represents each lineup as a set of player names (CPT + 5 FLEX).
-  4. Greedily selects up to num_lineups lineups, preferring higher
-     top1_pct_finish_rate while enforcing a maximum player-overlap constraint.
-  5. Writes the selected lineups to a new Excel workbook under outputs/top1pct/.
+This mirrors the NFL CLI but delegates the selection and exposure logic
+to `src.shared.diversify_core.run_diversify` and uses NBA paths.
 """
 
 import argparse
-from pathlib import Path
 from typing import List
 
-import pandas as pd
-
+from ..shared import diversify_core
 from . import config
-from .shared import diversify_core
 
 
 def run(
@@ -30,13 +20,7 @@ def run(
     min_top1_pct: float = 1.0,
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
-) -> Path:
-    """
-    NFL wrapper around the shared diversification core.
-
-    This preserves the existing CLI while delegating the selection and
-    exposure math to `shared.diversify_core.run_diversify`.
-    """
+):
     return diversify_core.run_diversify(
         num_lineups=num_lineups,
         outputs_dir=config.OUTPUTS_DIR,
@@ -49,7 +33,7 @@ def run(
 def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Select a diversified subset of NFL Showdown lineups based on "
+            "Select a diversified subset of NBA Showdown lineups based on "
             "top 1% finish rate and player-overlap constraints."
         )
     )
@@ -82,7 +66,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Optional path to a top1pct workbook under outputs/top1pct/. "
+            "Optional path to a top1pct workbook under outputs/nba/top1pct/. "
             "If omitted, the most recent .xlsx file in that directory is used."
         ),
     )

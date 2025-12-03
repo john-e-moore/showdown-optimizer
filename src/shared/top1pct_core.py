@@ -1,39 +1,25 @@
 from __future__ import annotations
 
 """
-Estimate top 1% finish probability for NFL Showdown lineups.
+Sport-agnostic core for estimating top 1% finish probabilities for
+DraftKings Showdown lineups.
 
-This script:
-  1. Loads a lineup workbook from outputs/lineups/*.xlsx.
-  2. Loads a correlation workbook from outputs/correlations/*.xlsx.
-  3. Builds a multivariate normal model of player DK scores using
-     means + std devs + correlation matrix.
-  4. Uses ownership projections to approximate the field score distribution.
-  5. Estimates, for each lineup, the probability of finishing in the
-     top 1% of the modeled field.
+This module intentionally has no dependency on sport-specific config
+modules. Callers must provide:
 
-Usage example:
+  - outputs_dir: root outputs directory for the sport
+                 (e.g. outputs/nfl or outputs/nba).
 
-    python -m src.top1pct_finish_rate --field-size 23529
-
-You can also specify input workbooks explicitly:
-
-    python -m src.top1pct_finish_rate \\
-        --field-size 23529 \\
-        --lineups-excel outputs/lineups/lineups_20251126_204920.xlsx \\
-        --corr-excel outputs/correlations/showdown_corr_matrix.xlsx
+It operates purely on the standard Excel workbook schemas produced by
+the optimizer and correlation pipelines.
 """
 
-import argparse
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-
-from . import config, diagnostics
-from .shared import top1pct_core
 
 
 LINEUPS_SHEET_NAME = "Lineups"
@@ -154,35 +140,6 @@ def _load_corr_workbook(
     return sabersim_proj_df, corr_df
 
 
-def _load_simulation_stddevs() -> Dict[str, float]:
-    """
-    Optionally load per-player DK stdevs from diagnostics, if available.
-
-    Returns:
-        Mapping from player_name -> dk_sim_std.
-    """
-    diagnostics_dir = config.DIAGNOSTICS_DIR / "simulation"
-    csv_path = diagnostics_dir / "dk_sim_vs_proj.csv"
-    if not csv_path.is_file():
-        return {}
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return {}
-
-    if "player_name" not in df.columns or "dk_sim_std" not in df.columns:
-        return {}
-
-    std_by_name = (
-        df[["player_name", "dk_sim_std"]]
-        .dropna(subset=["player_name", "dk_sim_std"])
-        .set_index("player_name")["dk_sim_std"]
-        .to_dict()
-    )
-    return std_by_name
-
-
 def _build_player_universe(
     lineups_df: pd.DataFrame,
     ownership_df: pd.DataFrame,
@@ -199,6 +156,7 @@ def _build_player_universe(
         sigma: DK point standard deviations (shape P).
         cpt_own: CPT ownership fractions (shape P).
         flex_own: FLEX ownership fractions (shape P).
+        positions: string position labels (shape P).
     """
     # Players from correlation matrix.
     corr_players = [str(x) for x in corr_df.index.tolist()]
@@ -295,16 +253,8 @@ def _build_player_universe(
     else:
         pos_lp = pd.Series(index=lp_indexed.index, dtype=str)
 
-    # Combine dk_std from correlation projections, then lineup projections,
-    # and finally simulation-based std devs.
+    # Combine dk_std from correlation projections, then lineup projections.
     dk_std_series = dk_std_corr.combine_first(dk_std_lp)
-
-    # Optionally overlay simulation-based std devs.
-    sim_std_by_name = _load_simulation_stddevs()
-    if sim_std_by_name:
-        sim_std_series = pd.Series(sim_std_by_name)
-        # Only use sim std where we have it; leave others as dk_std / NaN.
-        dk_std_series = dk_std_series.combine_first(sim_std_series)
 
     # Combine positions with preference for correlation projections, then
     # lineup projections.
@@ -396,9 +346,7 @@ def _build_full_correlation(
     base_names = [str(x) for x in corr_df.index.tolist()]
     base_index: Dict[str, int] = {name: i for i, name in enumerate(base_names)}
 
-    n_base = len(base_names)
     n_total = len(universe_names)
-
     corr_full = np.eye(n_total, dtype=float)
     base_corr = corr_df.to_numpy(dtype=float)
 
@@ -573,8 +521,10 @@ def _build_lineup_weights(
     return W
 
 
-def run(
+def run_top1pct(
     field_size: int,
+    outputs_dir: Path,
+    *,
     lineups_excel: str | None = None,
     corr_excel: str | None = None,
     num_sims: int = 20_000,
@@ -584,115 +534,139 @@ def run(
     flex_var_factor: float = 3.5,
 ) -> Path:
     """
-    NFL wrapper around the shared top1pct core.
+    Execute the top 1% finish rate estimation pipeline for a given sport.
 
-    This preserves the existing CLI while delegating the math and IO to
-    `shared.top1pct_core.run_top1pct`.
+    Args:
+        field_size: Total number of lineups in the contest field.
+        outputs_dir: Root outputs directory for the sport
+                     (e.g. outputs/nfl or outputs/nba).
+        lineups_excel: Optional explicit path to a lineups workbook.
+        corr_excel: Optional explicit path to a correlation workbook.
+        num_sims: Number of Monte Carlo simulations.
+        random_seed: Optional RNG seed; if None, use nondeterministic seed.
+        field_var_shrink: Variance shrinkage factor for the modeled field.
+        field_z_score: Z-score for the upper tail of the field distribution.
+        flex_var_factor: Effective variance factor for FLEX component.
+
+    Returns:
+        Path to the written output Excel workbook.
     """
-    return top1pct_core.run_top1pct(
-        field_size=field_size,
-        outputs_dir=config.OUTPUTS_DIR,
-        lineups_excel=lineups_excel,
-        corr_excel=corr_excel,
+    lineups_dir = outputs_dir / "lineups"
+    corr_dir = outputs_dir / "correlations"
+
+    lineups_path = _resolve_latest_excel(lineups_dir, lineups_excel)
+    corr_path = _resolve_latest_excel(corr_dir, corr_excel)
+
+    print(f"Using lineups workbook: {lineups_path}")
+    print(f"Using correlation workbook: {corr_path}")
+
+    lineups_df, ownership_df, lineups_proj_df = _load_lineups_workbook(lineups_path)
+    sabersim_proj_df, corr_df = _load_corr_workbook(corr_path)
+
+    (
+        player_names,
+        mu,
+        sigma,
+        cpt_own,
+        flex_own,
+        positions,
+    ) = _build_player_universe(
+        lineups_df=lineups_df,
+        ownership_df=ownership_df,
+        sabersim_proj_df=sabersim_proj_df,
+        corr_df=corr_df,
+        lineups_proj_df=lineups_proj_df,
+    )
+
+    corr_full = _build_full_correlation(player_names, corr_df)
+    rng = np.random.default_rng(random_seed)
+
+    print(
+        f"Simulating correlated DK scores for {len(player_names)} players across "
+        f"{num_sims} simulations..."
+    )
+    X = _simulate_player_scores(
+        mu=mu,
+        sigma=sigma,
+        corr_full=corr_full,
         num_sims=num_sims,
-        random_seed=random_seed if random_seed is not None else config.SIM_RANDOM_SEED,
+        rng=rng,
+    )
+
+    # Floor simulated DK points at 0 for all non-DST, non-K positions.
+    non_dst_k_mask = ~np.isin(positions, ["DST", "K"])
+    X[:, non_dst_k_mask] = np.maximum(X[:, non_dst_k_mask], 0.0)
+
+    print("Computing field 99th percentile thresholds from ownership...")
+    thresholds = _compute_field_thresholds(
+        X=X,
+        cpt_own=cpt_own,
+        flex_own=flex_own,
         field_var_shrink=field_var_shrink,
         field_z_score=field_z_score,
         flex_var_factor=flex_var_factor,
     )
 
+    player_index = {name: i for i, name in enumerate(player_names)}
+    print("Scoring lineups across simulations...")
+    W = _build_lineup_weights(lineups_df=lineups_df, player_index=player_index)
 
-def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Estimate top 1% finish probabilities for NFL Showdown lineups "
-            "using correlated player outcomes and ownership."
+    # scores[s, k] = sum_i w_k[i] * X[s, i]
+    scores = X @ W.T  # shape (S, K)
+    if thresholds.shape[0] != scores.shape[0]:
+        raise ValueError("Thresholds array must have length equal to num_sims.")
+
+    indicators = scores >= thresholds[:, None]
+    p_top1 = indicators.mean(axis=0)
+
+    # Per-lineup mean/std plus top 1% rate.
+    mean_scores = scores.mean(axis=0)
+    std_scores = scores.std(axis=0, ddof=0)
+    lineup_summary_df = pd.DataFrame(
+        {
+            "rank": lineups_df.get("rank", pd.Series(range(1, scores.shape[1] + 1))),
+            "mean_score": mean_scores,
+            "std_score": std_scores,
+            "top1_pct_finish_rate": 100.0 * p_top1,
+        }
+    )
+
+    # Augment lineups DataFrame with top 1% probabilities.
+    lineups_with_top1 = lineups_df.copy()
+    lineups_with_top1["top1_pct_finish_rate"] = 100.0 * p_top1
+
+    # Prepare output path.
+    top1pct_dir = outputs_dir / "top1pct"
+    top1pct_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = top1pct_dir / f"top1pct_lineups_{timestamp}.xlsx"
+
+    meta_rows = [
+        {"key": "field_size", "value": field_size},
+        {"key": "num_sims", "value": num_sims},
+        {"key": "field_var_shrink", "value": field_var_shrink},
+        {"key": "field_z_score", "value": field_z_score},
+        {"key": "flex_var_factor", "value": flex_var_factor},
+        {"key": "lineups_workbook", "value": str(lineups_path)},
+        {"key": "correlation_workbook", "value": str(corr_path)},
+        {"key": "n_players", "value": len(player_names)},
+        {"key": "n_lineups", "value": len(lineups_df)},
+    ]
+    meta_df = pd.DataFrame(meta_rows)
+
+    print(f"Writing top 1% estimates to {output_path}...")
+    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+        lineups_with_top1.to_excel(
+            writer, sheet_name="Lineups_Top1Pct", index=False
         )
-    )
-    parser.add_argument(
-        "--field-size",
-        type=int,
-        required=True,
-        help="Total number of lineups in the contest field (e.g., 23529).",
-    )
-    parser.add_argument(
-        "--lineups-excel",
-        type=str,
-        default=None,
-        help=(
-            "Path to lineups Excel workbook under outputs/lineups/. "
-            "If omitted, the most recent .xlsx file in that directory is used."
-        ),
-    )
-    parser.add_argument(
-        "--corr-excel",
-        type=str,
-        default=None,
-        help=(
-            "Path to correlations Excel workbook under outputs/correlations/. "
-            "If omitted, the most recent .xlsx file in that directory is used."
-        ),
-    )
-    parser.add_argument(
-        "--num-sims",
-        type=int,
-        default=100_000,
-        help="Number of Monte Carlo simulations to run (default: 100000).",
-    )
-    parser.add_argument(
-        "--field-var-shrink",
-        type=float,
-        default=0.7,
-        help=(
-            "Multiplicative shrinkage factor for the modeled field variance "
-            "(0 < value <= 1, default: 0.7)."
-        ),
-    )
-    parser.add_argument(
-        "--field-z",
-        type=float,
-        default=2.0,
-        help=(
-            "Z-score used for the upper tail of the field score distribution "
-            "(default: 2.0, slightly below the canonical 99th percentile 2.326)."
-        ),
-    )
-    parser.add_argument(
-        "--flex-var-factor",
-        type=float,
-        default=3.5,
-        help=(
-            "Effective variance factor for the aggregate FLEX component "
-            "(<= 5.0; default: 3.5)."
-        ),
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=None,
-        help=(
-            "Optional random seed for reproducibility. "
-            "Defaults to config.SIM_RANDOM_SEED when omitted."
-        ),
-    )
-    return parser.parse_args(argv)
+        meta_df.to_excel(writer, sheet_name="Meta", index=False)
+
+    print("Done.")
+    return output_path
 
 
-def main(argv: List[str] | None = None) -> None:
-    args = _parse_args(argv)
-    run(
-        field_size=args.field_size,
-        lineups_excel=args.lineups_excel,
-        corr_excel=args.corr_excel,
-        num_sims=args.num_sims,
-        random_seed=args.random_seed,
-        field_var_shrink=args.field_var_shrink,
-        field_z_score=args.field_z,
-        flex_var_factor=args.flex_var_factor,
-    )
-
-
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "run_top1pct",
+]
 
 
