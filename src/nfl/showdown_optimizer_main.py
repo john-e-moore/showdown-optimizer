@@ -184,7 +184,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--salary-cap",
-        type:int,
+        type=int,
         default=50_000,
         help="DraftKings Showdown salary cap.",
     )
