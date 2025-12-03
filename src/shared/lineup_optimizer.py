@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 """
-NFL-specific Sabersim CSV loader and thin adaptor around the shared
-Showdown optimizer core.
+Sabersim CSV loader and thin adaptor around the shared Showdown optimizer core.
 
-This module is responsible for:
-  - Parsing Sabersim-style NFL Showdown projections CSVs.
-  - Constructing a `PlayerPool` of shared `Player` objects.
-  - Re-exporting shared optimizer types/functions for backward compatibility.
+This module is sport-agnostic and can be used by both NFL and NBA:
+
+  - Parses Sabersim-style Showdown projections CSVs.
+  - Constructs a `PlayerPool` of shared `Player` objects.
+  - Re-exports shared optimizer types/functions for convenience.
 
 All MILP model construction and optimization logic lives in
-`src.shared.optimizer_core`.
+`src/shared/optimizer_core.py`.
 """
 
 from pathlib import Path
@@ -18,7 +18,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from .shared.optimizer_core import (
+from .optimizer_core import (
     Player,
     PlayerPool,
     Lineup,
@@ -44,11 +44,11 @@ SABERSIM_IS_FLEX_ELIGIBLE_COL = "is_flex_eligible"
 
 def _load_raw_sabersim_csv(path: str | Path) -> pd.DataFrame:
     """
-    Load a Sabersim Showdown CSV and reduce to one FLEX-equivalent row per player.
+    Load a Sabersim Showdown CSV and reduce to one flex-style row per player.
 
     Heuristic:
       - For each (Name, Team) pair, keep the row with the LOWER salary, which
-        corresponds to FLEX in DraftKings Showdown.
+        corresponds to FLEX/UTIL in DraftKings Showdown.
       - Do NOT filter by position; optimizer may want DST, K, etc.
     """
     df = pd.read_csv(path)

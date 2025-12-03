@@ -20,7 +20,7 @@ import time
 import pandas as pd
 
 from .. import showdown_constraints  # only for generic team stack helper
-from ..lineup_optimizer import (
+from ..shared.lineup_optimizer import (
     Lineup,
     load_players_from_sabersim,
     optimize_showdown_lineups,

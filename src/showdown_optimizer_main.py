@@ -21,7 +21,7 @@ import pandas as pd
 
 from . import config
 from .showdown_constraints import build_custom_constraints, build_team_stack_constraint
-from .lineup_optimizer import (
+from .shared.lineup_optimizer import (
     Lineup,
     load_players_from_sabersim,
     optimize_showdown_lineups,
