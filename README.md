@@ -326,7 +326,7 @@ so `0.5` means +50% ROI and negative values mean losing money on average.
 
 ### End-to-end pipeline with run_full.sh
 
-You can run the full four-step pipeline (correlation → lineups → top1% →
+You can run the full NFL pipeline (correlation → lineups → top1% →
 diversified portfolio → DKEntries fill) with the provided helper script:
 
 ```bash
@@ -342,15 +342,10 @@ Where:
   (`none` or `multi`).
 - `STACK_WEIGHTS` (optional) are the multi-stack pattern weights passed through
   to `src.showdown_optimizer_main`.
-<<<<<<< HEAD
-- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select;
-  it defaults to `NUM_LINEUPS` when omitted.
-=======
 - `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select.
   If provided explicitly, it is used as-is. When omitted, the script defaults
   to the number of entries in the latest `DKEntries*.csv` under
   `data/dkentries/`.
->>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
 
 The script will:
 
@@ -359,10 +354,37 @@ The script will:
 3. Estimate top 1% finish probabilities into `outputs/top1pct/`.
 4. Select a diversified subset of `DIVERSIFIED_NUM` lineups based on
    `top1_pct_finish_rate` and player-overlap constraints.
-<<<<<<< HEAD
-=======
 5. Fill the latest DKEntries CSV template from `data/dkentries/` with the
    selected diversified lineups, writing a DK-upload-ready CSV (with lineup
    slots formatted as `{player_name} ({player_id})`) under `outputs/dkentries/`.
->>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
+
+### NBA Showdown pipeline
+
+The NBA side mirrors the NFL layout with:
+
+- `data/nba/sabersim/`: Sabersim NBA Showdown projections CSVs.
+- `data/nba/contests/`: DraftKings NBA Showdown contest CSVs.
+- `data/nba/dkentries/`: NBA DKEntries templates.
+- `data/nba/payouts/`: DraftKings payout JSON files.
+- `outputs/nba/correlations/`: NBA correlation workbooks.
+- `outputs/nba/lineups/`: NBA lineup workbooks.
+- `outputs/nba/top1pct/`: NBA top 1% and diversified lineups.
+- `outputs/nba/dkentries/`: Filled NBA DKEntries CSVs.
+- `outputs/nba/flashback/`: NBA flashback analysis workbooks.
+
+Key NBA entrypoints:
+
+- Correlations: `python -m src.nba.main --sabersim-csv ... --output-excel ...`
+- Optimizer: `python -m src.nba.showdown_optimizer_main --sabersim-glob ...`
+- Top 1%: `python -m src.nba.top1pct_finish_rate_nba --field-size ...`
+- Diversification: `python -m src.nba.diversify_lineups_nba --num-lineups ...`
+- DKEntries fill: `python -m src.nba.fill_dkentries_nba`
+- Flashback: `python -m src.nba.flashback_sim_nba`
+
+For a full end-to-end NBA run (correlations → optimizer → top 1% →
+diversification → DKEntries fill), use:
+
+```bash
+./run_full_nba.sh PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]
+```
 

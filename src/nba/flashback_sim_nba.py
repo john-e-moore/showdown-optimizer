@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 """
-Flashback contest simulation for completed NFL Showdown slates.
+Flashback contest simulation for completed NBA Showdown slates.
 
-This CLI is a thin wrapper around the sport-agnostic core in
-`src.shared.flashback_core`.
+This mirrors the NFL flashback CLI but uses NBA config and correlation
+builder while delegating the core logic to `src.shared.flashback_core`.
 """
 
 import argparse
 from typing import List
 
-from . import build_corr_matrix_from_projections, config, simulation_corr
-from .shared import flashback_core
+from ..shared import flashback_core
+from . import config, sabersim_parser, simulation_corr
 
 
 def run(
@@ -22,7 +22,7 @@ def run(
     payouts_csv: str | None = None,
 ):
     """
-    Execute the flashback contest simulation pipeline for NFL.
+    Execute the flashback contest simulation pipeline for NBA.
     """
     return flashback_core.run_flashback(
         contest_csv=contest_csv,
@@ -31,19 +31,19 @@ def run(
         random_seed=random_seed,
         payouts_csv=payouts_csv,
         config_module=config,
-        load_sabersim_projections=build_corr_matrix_from_projections.load_sabersim_projections,
+        load_sabersim_projections=sabersim_parser.load_sabersim_projections,
         simulate_corr_matrix_from_projections=simulation_corr.simulate_corr_matrix_from_projections,
-        name_col=build_corr_matrix_from_projections.SABERSIM_NAME_COL,
-        team_col=build_corr_matrix_from_projections.SABERSIM_TEAM_COL,
-        salary_col=build_corr_matrix_from_projections.SABERSIM_SALARY_COL,
-        dk_proj_col=build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL,
+        name_col=sabersim_parser.SABERSIM_NAME_COL,
+        team_col=sabersim_parser.SABERSIM_TEAM_COL,
+        salary_col=sabersim_parser.SABERSIM_SALARY_COL,
+        dk_proj_col="My Proj",
     )
 
 
 def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Flashback contest simulation for completed NFL Showdown slates "
+            "Flashback contest simulation for completed NBA Showdown slates "
             "using Sabersim projections and a correlation matrix."
         )
     )
@@ -52,7 +52,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to contest standings CSV under data/contests/. "
+            "Path to contest standings CSV under data/nba/contests/. "
             "If omitted, the most recent .csv file in that directory is used."
         ),
     )
@@ -61,7 +61,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to Sabersim projections CSV under data/sabersim/. "
+            "Path to Sabersim projections CSV under data/nba/sabersim/. "
             "If omitted, the most recent .csv file in that directory is used."
         ),
     )
@@ -70,7 +70,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to DraftKings payout JSON for this contest under data/payouts/. "
+            "Path to DraftKings payout JSON for this contest under data/nba/payouts/. "
             "Despite the name, this flag expects the JSON format used in "
             "payouts-*.json. If omitted, a default payouts-{contest_id}.json "
             "is inferred from the contest filename or downloaded from DraftKings."
