@@ -740,10 +740,14 @@ def _add_ownership_columns_to_simulation(
 
 def _build_entrant_summary(
     simulation_df: pd.DataFrame,
+    flex_role_label: str,
 ) -> pd.DataFrame:
     """
-    Build entrant-level summary statistics from per-lineup simulation results.
+    Build entrant-level summary statistics from per-lineup simulation results,
+    including CPT and flex-style player usage percentages.
     """
+    flex_label_up = flex_role_label.upper()
+
     # Mean performance metrics by entrant.
     grouped = simulation_df.groupby("Entrant", as_index=False)
     agg_spec: Dict[str, str] = {
@@ -775,12 +779,101 @@ def _build_entrant_summary(
 
     summary = entries_df.merge(summary, on="Entrant", how="left")
 
-    # Final column ordering.
-    cols = ["Entrant", "Entries"]
+    # Early exit for empty input.
+    if summary.empty:
+        cols = ["Entrant", "Entries"]
+        if "Avg. Sim ROI" in summary.columns:
+            cols.append("Avg. Sim ROI")
+        cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
+        summary = summary.reindex(columns=[c for c in cols if c in summary.columns])
+        return summary
+
+    # Entrant-level CPT usage counts per player.
+    cpt_counts = (
+        simulation_df.groupby(["Entrant", "CPT"])
+        .size()
+        .unstack(fill_value=0)
+        .astype(float)
+    )
+
+    if not cpt_counts.empty:
+        entries_series = entries_df.set_index("Entrant")["Entries"].astype(float)
+        cpt_entries = entries_series.reindex(cpt_counts.index).replace(0.0, np.nan)
+        cpt_usage_pct = cpt_counts.div(cpt_entries, axis=0).fillna(0.0)
+
+        # Deterministic CPT column ordering by player name.
+        cpt_player_names = [str(name) for name in cpt_usage_pct.columns]
+        cpt_player_names_sorted = sorted(cpt_player_names)
+        cpt_usage_pct = cpt_usage_pct.reindex(columns=cpt_player_names_sorted)
+        cpt_usage_pct.columns = [f"CPT {name}" for name in cpt_player_names_sorted]
+
+        cpt_usage_pct = cpt_usage_pct.reset_index()
+        summary = summary.merge(cpt_usage_pct, on="Entrant", how="left")
+
+    # Entrant-level flex-style usage counts per player.
+    flex_cols = ["Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]
+    flex_cols_present = [col for col in flex_cols if col in simulation_df.columns]
+    if flex_cols_present:
+        flex_long = simulation_df.melt(
+            id_vars=["Entrant"],
+            value_vars=flex_cols_present,
+            var_name="slot",
+            value_name="Player",
+        )
+        # Drop missing player names, if any.
+        flex_long = flex_long.dropna(subset=["Player"])
+        flex_long["Player"] = flex_long["Player"].astype(str)
+
+        flex_counts = (
+            flex_long.groupby(["Entrant", "Player"])
+            .size()
+            .unstack(fill_value=0)
+            .astype(float)
+        )
+
+        if not flex_counts.empty:
+            entries_series = entries_df.set_index("Entrant")["Entries"].astype(float)
+            flex_entries = entries_series.reindex(flex_counts.index).replace(
+                0.0, np.nan
+            )
+            flex_usage_pct = flex_counts.div(flex_entries, axis=0).fillna(0.0)
+
+            # Deterministic flex column ordering by player name.
+            flex_player_names = [str(name) for name in flex_usage_pct.columns]
+            flex_player_names_sorted = sorted(flex_player_names)
+            flex_usage_pct = flex_usage_pct.reindex(columns=flex_player_names_sorted)
+            flex_usage_pct.columns = [
+                f"{flex_label_up} {name}" for name in flex_player_names_sorted
+            ]
+
+            flex_usage_pct = flex_usage_pct.reset_index()
+            summary = summary.merge(flex_usage_pct, on="Entrant", how="left")
+
+    # Replace any NaNs in usage columns with 0.0.
+    usage_cols = [
+        col
+        for col in summary.columns
+        if col.startswith("CPT ") or col.startswith(f"{flex_label_up} ")
+    ]
+    if usage_cols:
+        summary[usage_cols] = summary[usage_cols].fillna(0.0)
+
+    # Final column ordering: base columns, then all CPT usage columns, then flex usage.
+    base_cols = ["Entrant", "Entries"]
     if "Avg. Sim ROI" in summary.columns:
-        cols.append("Avg. Sim ROI")
-    cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
-    summary = summary[cols]
+        base_cols.append("Avg. Sim ROI")
+    base_cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
+
+    cpt_usage_cols = sorted([c for c in summary.columns if c.startswith("CPT ")])
+    flex_usage_cols = sorted(
+        [c for c in summary.columns if c.startswith(f"{flex_label_up} ")]
+    )
+
+    ordered_cols = [c for c in base_cols if c in summary.columns]
+    ordered_cols.extend(cpt_usage_cols)
+    ordered_cols.extend(flex_usage_cols)
+
+    summary = summary.reindex(columns=ordered_cols)
     return summary
 
 
@@ -917,6 +1010,23 @@ def run_flashback(
     """
     # Normalize flex role label for downstream use.
     flex_role_label_up = flex_role_label.upper()
+
+    def _apply_column_formats(
+        worksheet: Any,
+        df: pd.DataFrame,
+        column_names: Sequence[str],
+        fmt,
+        *,
+        width: float = 12.0,
+    ) -> None:
+        """
+        Apply an xlsxwriter format to columns in a worksheet by dataframe column name.
+        """
+        for name in column_names:
+            if name not in df.columns:
+                continue
+            col_idx = df.columns.get_loc(name)
+            worksheet.set_column(col_idx, col_idx, width, fmt)
 
     # Resolve input paths.
     contest_dir = config_module.DATA_DIR / "contests"
@@ -1188,7 +1298,9 @@ def run_flashback(
     )
 
     # Entrant and player summaries.
-    entrant_summary_df = _build_entrant_summary(simulation_df)
+    entrant_summary_df = _build_entrant_summary(
+        simulation_df, flex_role_label=flex_role_label_up
+    )
     player_summary_df = _build_player_summary(
         simulation_df,
         projected_ownership_by_player,
@@ -1207,6 +1319,86 @@ def run_flashback(
         simulation_df.to_excel(writer, sheet_name="Simulation", index=False)
         entrant_summary_df.to_excel(writer, sheet_name="Entrant summary", index=False)
         player_summary_df.to_excel(writer, sheet_name="Player summary", index=False)
+
+        # Excel formatting for readability.
+        workbook = writer.book
+        ws_sim = writer.sheets.get("Simulation")
+        ws_entrant = writer.sheets.get("Entrant summary")
+        ws_player = writer.sheets.get("Player summary")
+
+        if workbook is not None:
+            pct_fmt = workbook.add_format({"num_format": "0.0%"})
+            num_fmt = workbook.add_format({"num_format": "0.00"})
+
+            # Simulation sheet formatting.
+            if ws_sim is not None:
+                sim_pct_cols = [
+                    "Top 1%",
+                    "Top 5%",
+                    "Top 20%",
+                    "Sim ROI",
+                    "Actual ROI",
+                ]
+                sim_num_cols = [
+                    "Avg Points",
+                    "Actual Points",
+                    "Duplicates",
+                    "Sum Ownership",
+                    "Salary-weighted Ownership",
+                ]
+                _apply_column_formats(ws_sim, simulation_df, sim_pct_cols, pct_fmt)
+                _apply_column_formats(ws_sim, simulation_df, sim_num_cols, num_fmt)
+
+            # Entrant summary sheet formatting.
+            if ws_entrant is not None:
+                entrant_pct_base = [
+                    "Avg. Top 1%",
+                    "Avg. Top 5%",
+                    "Avg. Top 20%",
+                    "Avg. Sim ROI",
+                ]
+                usage_pct_cols = [
+                    col
+                    for col in entrant_summary_df.columns
+                    if col.startswith("CPT ")
+                    or col.startswith(f"{flex_role_label_up} ")
+                ]
+                entrant_pct_cols = [
+                    col
+                    for col in entrant_pct_base
+                    if col in entrant_summary_df.columns
+                ] + usage_pct_cols
+                _apply_column_formats(
+                    ws_entrant, entrant_summary_df, entrant_pct_cols, pct_fmt
+                )
+
+                entrant_num_cols = [
+                    col
+                    for col in ["Entries", "Avg Points"]
+                    if col in entrant_summary_df.columns
+                ]
+                _apply_column_formats(
+                    ws_entrant, entrant_summary_df, entrant_num_cols, num_fmt
+                )
+
+            # Player summary sheet formatting.
+            if ws_player is not None:
+                flex_label_up = flex_role_label_up
+                player_pct_cols = [
+                    "CPT draft %",
+                    "CPT proj ownership",
+                    f"{flex_label_up} draft %",
+                    f"{flex_label_up} proj ownership",
+                    "CPT Sim ROI",
+                    f"{flex_label_up} Sim ROI",
+                    "CPT top 1% rate",
+                    f"{flex_label_up} top 1% rate",
+                    "CPT top 20% rate",
+                    f"{flex_label_up} top 20% rate",
+                ]
+                _apply_column_formats(
+                    ws_player, player_summary_df, player_pct_cols, pct_fmt
+                )
 
     print("Done.")
     return output_path
