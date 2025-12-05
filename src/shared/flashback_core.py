@@ -1,56 +1,184 @@
 from __future__ import annotations
 
 """
-Flashback contest simulation for completed NFL Showdown slates.
+Sport-agnostic flashback contest simulation core for completed Showdown slates.
 
-This script:
-  1. Loads a completed DraftKings Showdown contest CSV from data/contests/.
-  2. Loads Sabersim projections for the same slate from data/sabersim/.
-  3. Builds a player correlation matrix from Sabersim projections using the
-     existing simulation-based correlation pipeline.
-  4. Simulates correlated player DK outcomes and scores every actual contest
-     lineup.
-  5. Writes an Excel workbook with:
-       - Standings: original contest CSV.
-       - Simulation: per-lineup CPT/FLEX players, Top 1% / Top 5% / Top 20%
-         finish rates, and average DK points.
-       - Entrant summary: averages of these metrics across entries for each
-         entrant (cleaned EntryName).
-       - Player summary: draft rates and simulation performance by role
-         (CPT vs FLEX).
+This module implements the heavy lifting for:
+  - Loading contest standings and parsing CPT plus flex-style lineups.
+  - Loading Sabersim projections and building a correlation matrix.
+  - Simulating correlated DK scores for all players.
+  - Scoring every contest lineup across simulations.
+  - Computing finish rates, simulated ROI, and summary tables.
 
-Usage example:
+It is parameterised by:
+  - config_module: provides DATA_DIR, OUTPUTS_DIR, SABERSIM_DIR, SIM_RANDOM_SEED.
+  - load_sabersim_projections: function(path) -> flex-style Sabersim dataframe.
+  - simulate_corr_matrix_from_projections: function(sabersim_df) -> corr_df.
 
-    python -m src.flashback_sim
-
-or with explicit inputs:
-
-    python -m src.flashback_sim \\
-        --contest-csv data/contests/my_contest.csv \\
-        --sabersim-csv data/sabersim/my_slate.csv \\
-        --num-sims 100000
+NFL and NBA wrappers should live in sport-specific modules and call
+`run_flashback` with their own config and loader functions.
 """
 
-import argparse
 import json
 import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
-from collections import Counter
+from typing import Dict, Iterable, List, Sequence, Tuple, Callable, Any
+
 import numpy as np
 import pandas as pd
 
-from . import build_corr_matrix_from_projections, config, simulation_corr
 
-
-FLASHBACK_SUBDIR = "flashback"
 DK_PAYOUT_URL_TEMPLATE = (
     "https://api.draftkings.com/contests/v1/contests/{contest_id}?format=json"
 )
+FLASHBACK_SUBDIR = "flashback"
+
+
+@dataclass
+class ParsedLineup:
+    """Structured representation of a single contest lineup."""
+
+    entrant: str
+    entry_name_raw: str
+    cpt: str
+    flex: Tuple[str, str, str, str, str]
+
+
+def _resolve_latest_csv(directory: Path, explicit: str | None) -> Path:
+    """
+    Resolve a CSV path, preferring an explicit argument when provided.
+
+    If explicit is None, pick the most recent *.csv file in `directory`.
+    """
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise FileNotFoundError(f"Specified CSV file does not exist: {path}")
+        return path
+
+    candidates = sorted(directory.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        raise FileNotFoundError(f"No .csv files found in directory: {directory}")
+    return candidates[-1]
+
+
+def _clean_entrant_name(entry_name: str) -> str:
+    """
+    Clean an EntryName like 'Fantassin (4/5)' down to just 'Fantassin'.
+    """
+    if not isinstance(entry_name, str):
+        return str(entry_name)
+    # Remove a trailing parenthetical like " (4/5)".
+    return re.sub(r"\s*\([^)]*\)\s*$", "", entry_name).strip()
+
+
+def _parse_lineup_string(lineup: str) -> Tuple[str, Tuple[str, str, str, str, str]]:
+    """
+    Parse a DraftKings Showdown lineup string into one CPT and five flex-role names.
+
+    DraftKings uses ``CPT`` plus either ``FLEX`` (NFL) or ``UTIL`` (NBA) tokens
+    in the exported lineup strings; both FLEX and UTIL are treated as flex-style
+    slots here.
+    """
+    if not isinstance(lineup, str):
+        raise ValueError(f"Lineup value is not a string: {lineup!r}")
+
+    tokens = lineup.split()
+    # Accept both FLEX and UTIL as flex-style roles.
+    roles = {"CPT", "FLEX", "UTIL"}
+
+    current_role: str | None = None
+    current_name_tokens: List[str] = []
+    cpt_name: str | None = None
+    flex_names: List[str] = []
+
+    def flush_current() -> None:
+        nonlocal cpt_name, flex_names, current_role, current_name_tokens
+        if current_role is None:
+            return
+        name = " ".join(current_name_tokens).strip()
+        if not name:
+            return
+        if current_role == "CPT":
+            if cpt_name is not None:
+                raise ValueError(
+                    f"Multiple CPT players found in lineup string: {lineup!r}"
+                )
+            cpt_name = name
+        else:
+            # Any non-CPT role token (FLEX, UTIL, etc.) is treated as a flex slot.
+            flex_names.append(name)
+        current_role = None
+        current_name_tokens = []
+
+    for tok in tokens:
+        if tok in roles:
+            # Starting a new role; flush the previous one.
+            flush_current()
+            current_role = tok
+            current_name_tokens = []
+        else:
+            current_name_tokens.append(tok)
+
+    # Flush the final role.
+    flush_current()
+
+    if cpt_name is None:
+        raise ValueError(f"No CPT player found in lineup string: {lineup!r}")
+    if len(flex_names) != 5:
+        raise ValueError(
+            "Expected 5 non-CPT (flex-style) players in lineup string, found "
+            f"{len(flex_names)}: {lineup!r}"
+        )
+
+    return cpt_name, (flex_names[0], flex_names[1], flex_names[2], flex_names[3], flex_names[4])
+
+
+def _load_contest_lineups(contest_csv: Path) -> Tuple[pd.DataFrame, List[ParsedLineup]]:
+    """
+    Load contest standings CSV and parse lineups into structured form.
+
+    Returns:
+        standings_df: original contest standings dataframe.
+        parsed_lineups: list of ParsedLineup objects for each entry.
+    """
+    standings_df = pd.read_csv(contest_csv)
+
+    required_cols = {"EntryName", "Lineup"}
+    missing = required_cols.difference(standings_df.columns)
+    if missing:
+        raise KeyError(
+            f"Contest CSV missing required columns {sorted(missing)}. "
+            f"Expected at least {sorted(required_cols)}."
+        )
+
+    parsed: List[ParsedLineup] = []
+    for _, row in standings_df.iterrows():
+        entry_name_raw = row["EntryName"]
+        lineup_val = row["Lineup"]
+
+        # Some rows may not have a valid lineup string (NaN/blank); skip them.
+        if pd.isna(lineup_val):
+            continue
+        lineup_str = str(lineup_val)
+        if not lineup_str.strip():
+            continue
+
+        entrant = _clean_entrant_name(str(entry_name_raw))
+        cpt, flex = _parse_lineup_string(lineup_str)
+        parsed.append(
+            ParsedLineup(
+                entrant=entrant,
+                entry_name_raw=str(entry_name_raw),
+                cpt=cpt,
+                flex=flex,
+            )
+        )
+
+    return standings_df, parsed
 
 
 def _download_payout_json(contest_id: str, dest_path: Path) -> bool:
@@ -104,168 +232,17 @@ def _download_payout_json(contest_id: str, dest_path: Path) -> bool:
     return True
 
 
-@dataclass
-class ParsedLineup:
-    """Structured representation of a single contest lineup."""
-
-    entrant: str
-    entry_name_raw: str
-    cpt: str
-    flex: Tuple[str, str, str, str, str]
-
-
-def _resolve_latest_csv(directory: Path, explicit: str | None) -> Path:
-    """
-    Resolve a CSV path, preferring an explicit argument when provided.
-
-    If explicit is None, pick the most recent *.csv file in `directory`.
-    """
-    if explicit:
-        path = Path(explicit)
-        if not path.is_file():
-            raise FileNotFoundError(f"Specified CSV file does not exist: {path}")
-        return path
-
-    candidates = sorted(directory.glob("*.csv"), key=lambda p: p.stat().st_mtime)
-    if not candidates:
-        raise FileNotFoundError(f"No .csv files found in directory: {directory}")
-    return candidates[-1]
-
-
-def _clean_entrant_name(entry_name: str) -> str:
-    """
-    Clean an EntryName like 'Fantassin (4/5)' down to just 'Fantassin'.
-    """
-    if not isinstance(entry_name, str):
-        return str(entry_name)
-    # Remove a trailing parenthetical like " (4/5)".
-    return re.sub(r"\s*\([^)]*\)\s*$", "", entry_name).strip()
-
-
-def _parse_lineup_string(lineup: str) -> Tuple[str, Tuple[str, str, str, str, str]]:
-    """
-    Parse a DraftKings Showdown lineup string into CPT and five FLEX names.
-
-    Example lineup string:
-        "CPT A.J. Brown FLEX Jalen Hurts FLEX DeVonta Smith FLEX D'Andre Swift "
-        "FLEX Jake Elliott FLEX Luther Burden III"
-    """
-    if not isinstance(lineup, str):
-        raise ValueError(f"Lineup value is not a string: {lineup!r}")
-
-    tokens = lineup.split()
-    roles = {"CPT", "FLEX"}
-
-    current_role: str | None = None
-    current_name_tokens: List[str] = []
-    cpt_name: str | None = None
-    flex_names: List[str] = []
-
-    def flush_current() -> None:
-        nonlocal cpt_name, flex_names, current_role, current_name_tokens
-        if current_role is None:
-            return
-        name = " ".join(current_name_tokens).strip()
-        if not name:
-            return
-        if current_role == "CPT":
-            if cpt_name is not None:
-                raise ValueError(
-                    f"Multiple CPT players found in lineup string: {lineup!r}"
-                )
-            cpt_name = name
-        elif current_role == "FLEX":
-            flex_names.append(name)
-        current_role = None
-        current_name_tokens = []
-
-    for tok in tokens:
-        if tok in roles:
-            # Starting a new role; flush the previous one.
-            flush_current()
-            current_role = tok
-            current_name_tokens = []
-        else:
-            current_name_tokens.append(tok)
-
-    # Flush the final role.
-    flush_current()
-
-    if cpt_name is None:
-        raise ValueError(f"No CPT player found in lineup string: {lineup!r}")
-    if len(flex_names) != 5:
-        raise ValueError(
-            f"Expected 5 FLEX players in lineup string, found {len(flex_names)}: "
-            f"{lineup!r}"
-        )
-
-    return cpt_name, (flex_names[0], flex_names[1], flex_names[2], flex_names[3], flex_names[4])
-
-
-def _load_contest_lineups(contest_csv: Path) -> Tuple[pd.DataFrame, List[ParsedLineup]]:
-    """
-    Load contest standings CSV and parse lineups into structured form.
-
-    Returns:
-        standings_df: original contest standings dataframe.
-        parsed_lineups: list of ParsedLineup objects for each entry.
-    """
-    standings_df = pd.read_csv(contest_csv)
-
-    required_cols = {"EntryName", "Lineup"}
-    missing = required_cols.difference(standings_df.columns)
-    if missing:
-        raise KeyError(
-            f"Contest CSV missing required columns {sorted(missing)}. "
-            f"Expected at least {sorted(required_cols)}."
-        )
-
-    parsed: List[ParsedLineup] = []
-    for _, row in standings_df.iterrows():
-        entry_name_raw = row["EntryName"]
-        lineup_str = row["Lineup"]
-        entrant = _clean_entrant_name(str(entry_name_raw))
-        cpt, flex = _parse_lineup_string(str(lineup_str))
-        parsed.append(
-            ParsedLineup(
-                entrant=entrant,
-                entry_name_raw=str(entry_name_raw),
-                cpt=cpt,
-                flex=flex,
-            )
-        )
-
-    return standings_df, parsed
-
-
 def _load_payout_structure(
     payouts_csv: str | None,
     contest_id: str,
     num_entries: int,
+    *,
+    data_dir: Path,
 ) -> Tuple[np.ndarray, float] | None:
     """
     Load DraftKings payout structure for a contest and build a rank→payout array.
-
-    Args:
-        payouts_csv: Optional explicit path passed via --payouts-csv. Despite the
-            name, this is expected to point to the DraftKings payout JSON.
-        contest_id: Contest identifier string (e.g., '185418998').
-        num_entries: Number of entries in the contest standings CSV.
-
-    Returns:
-        (payouts, entry_fee) where:
-          - payouts: float array of length num_entries where payouts[pos-1] is
-            the cash payout for finishing position `pos` (0.0 for unpaid).
-          - entry_fee: contest entry fee as a float.
-
-        Returns None if no default payout file is found when payouts_csv is None.
-
-    Raises:
-        FileNotFoundError: if an explicit payouts_csv path is provided but does
-            not exist.
-        ValueError: if the JSON structure is missing expected keys.
     """
-    payouts_dir = config.DATA_DIR / "payouts"
+    payouts_dir = data_dir / "payouts"
 
     if payouts_csv is not None:
         path = Path(payouts_csv)
@@ -355,13 +332,6 @@ def _build_player_universe_and_weights(
 ) -> Tuple[List[str], Dict[str, int], np.ndarray, pd.DataFrame]:
     """
     Build the player universe and lineup weight matrix from parsed lineups.
-
-    Returns:
-        player_names: list of unique player names in model order.
-        player_index: mapping from player name to index.
-        W: weight matrix of shape (num_lineups, num_players) where CPT has
-           weight 1.5 and each FLEX has weight 1.0.
-        lineups_df: dataframe with Entrant, EntryName, CPT, Flex1..Flex5 columns.
     """
     # Unique player names in order of appearance.
     player_names: List[str] = []
@@ -400,7 +370,7 @@ def _build_player_universe_and_weights(
     for k, pl in enumerate(parsed_lineups):
         # CPT weight 1.5
         W[k, player_index[pl.cpt]] += 1.5
-        # FLEX weights 1.0
+        # Flex-style weights 1.0
         for name in pl.flex:
             W[k, player_index[name]] += 1.0
 
@@ -412,41 +382,27 @@ def _build_player_universe_from_sabersim_and_lineups(
     sabersim_df: pd.DataFrame,
     corr_df: pd.DataFrame,
     lineup_player_names: Iterable[str],
+    *,
+    name_col: str,
+    dk_proj_col: str,
 ) -> Tuple[List[str], np.ndarray, np.ndarray]:
     """
     Build unified player universe, means, and std devs from Sabersim + lineups.
-
-    Universe construction:
-      1) Players in the correlation matrix (Sabersim-based) in their existing order.
-      2) Remaining players from the Sabersim dataframe.
-      3) Any additional players that appear only in the contest lineups.
-
-    For each player:
-      - mu: Sabersim 'My Proj' if available, else 0.0.
-      - sigma: 'dk_std' if available; otherwise a heuristic
-               max(1.0, 0.7 * max(mu, 0)).
     """
-    # Player means and optional std devs from Sabersim projections.
-    if build_corr_matrix_from_projections.SABERSIM_NAME_COL not in sabersim_df.columns:
+    if name_col not in sabersim_df.columns:
         raise KeyError(
-            "Sabersim projections missing 'Name' column; expected under "
-            f"{build_corr_matrix_from_projections.SABERSIM_NAME_COL!r}."
+            f"Sabersim projections missing Name column {name_col!r}."
         )
-    if build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL not in sabersim_df.columns:
+    if dk_proj_col not in sabersim_df.columns:
         raise KeyError(
-            "Sabersim projections missing DK projection column "
-            f"{build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL!r}."
+            f"Sabersim projections missing DK projection column {dk_proj_col!r}."
         )
 
     sabersim = sabersim_df.copy()
-    sabersim["Name"] = sabersim[
-        build_corr_matrix_from_projections.SABERSIM_NAME_COL
-    ].astype(str)
+    sabersim["Name"] = sabersim[name_col].astype(str)
     sabersim_indexed = sabersim.set_index("Name")
 
-    mu_saber = sabersim_indexed[
-        build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL
-    ].astype(float)
+    mu_saber = sabersim_indexed[dk_proj_col].astype(float)
 
     if "dk_std" in sabersim_indexed.columns:
         dk_std_saber = sabersim_indexed["dk_std"].astype(float)
@@ -498,9 +454,6 @@ def _build_full_correlation(
 ) -> np.ndarray:
     """
     Build a full correlation matrix over the unified player universe.
-
-    Players that are not present in the input matrix are treated as
-    independent (corr=0 with others, corr=1 with self).
     """
     base_names = [str(x) for x in corr_df.index.tolist()]
     base_index: Dict[str, int] = {name: i for i, name in enumerate(base_names)}
@@ -556,9 +509,6 @@ def _simulate_player_scores(
 ) -> np.ndarray:
     """
     Draw correlated player DK scores from a multivariate normal.
-
-    Returns:
-        X: array of shape (num_sims, P) with DK scores.
     """
     outer = np.outer(sigma, sigma)
     cov = corr_full * outer
@@ -572,15 +522,6 @@ def _compute_lineup_finish_rates(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute top 1%, top 5%, top 20% finish rates and average points per lineup.
-
-    Args:
-        scores: array of shape (num_sims, num_lineups) with DK scores.
-
-    Returns:
-        top1: array of shape (num_lineups,) with Top 1% finish rates (fractions).
-        top5: array of shape (num_lineups,) with Top 5% finish rates (fractions).
-        top20: array of shape (num_lineups,) with Top 20% finish rates (fractions).
-        avg_points: array of shape (num_lineups,) with mean DK points.
     """
     if scores.ndim != 2:
         raise ValueError("scores must be a 2D array of shape (num_sims, num_lineups).")
@@ -609,16 +550,6 @@ def _compute_sim_roi(
 ) -> np.ndarray:
     """
     Compute simulated ROI for each lineup given a payout structure.
-
-    Args:
-        scores: array of shape (num_sims, num_lineups) with DK scores.
-        payouts_by_rank: array where payouts_by_rank[pos-1] is the dollar
-            payout for finishing position `pos` (0 for unpaid positions).
-        entry_fee: contest entry fee (must be > 0).
-
-    Returns:
-        sim_roi: array of shape (num_lineups,) with expected ROI per lineup:
-            (expected_payout - entry_fee) / entry_fee.
     """
     if scores.ndim != 2:
         raise ValueError("scores must be a 2D array of shape (num_sims, num_lineups).")
@@ -656,7 +587,6 @@ def _compute_sim_roi(
             while end < num_lineups and sorted_scores[end] == sorted_scores[start]:
                 end += 1
 
-            # Rank indices for this tie group are start..end-1 (0-based).
             lo = start
             hi = end
             group_len = hi - lo
@@ -669,12 +599,9 @@ def _compute_sim_roi(
                 avg_payout = 0.0
             else:
                 slice_hi = min(hi, payouts_full.size)
-                # Sum payouts for the portion of the tie group that has defined
-                # payouts; positions beyond slice_hi are treated as zero.
                 total = float(payouts_full[lo:slice_hi].sum()) if slice_hi > lo else 0.0
                 avg_payout = total / float(group_len)
 
-            # Assign the averaged payout to all entries in this tie group.
             tied_indices = order[lo:hi]
             payouts_this_sim[tied_indices] = avg_payout
 
@@ -690,23 +617,15 @@ def _compute_sim_roi(
 
 def _build_sabersim_ownership_and_salary(
     sabersim_raw_df: pd.DataFrame,
+    *,
+    name_col: str,
+    team_col: str,
+    salary_col: str,
+    proj_col: str,
 ) -> Dict[Tuple[str, str], Dict[str, float]]:
     """
-    Build CPT/FLEX ownership and salary mapping from the raw Sabersim CSV.
-
-    For each (Name, Team) pair:
-      - Sort rows by DK projection descending.
-      - Treat the highest-projection row as the CPT-equivalent row.
-      - If a second row exists, treat it as the FLEX-equivalent row.
-
-    Ownership values are kept in the same units as the Sabersim 'My Own'
-    column (e.g., 0.67 meaning 0.67%).
+    Build CPT / flex-style ownership and salary mapping from the raw Sabersim CSV.
     """
-    name_col = build_corr_matrix_from_projections.SABERSIM_NAME_COL
-    team_col = build_corr_matrix_from_projections.SABERSIM_TEAM_COL
-    salary_col = build_corr_matrix_from_projections.SABERSIM_SALARY_COL
-    proj_col = build_corr_matrix_from_projections.SABERSIM_DK_PROJ_COL
-
     required_cols = {name_col, team_col, salary_col, proj_col, "My Own"}
     missing = required_cols.difference(sabersim_raw_df.columns)
     if missing:
@@ -754,7 +673,7 @@ def _build_projected_ownership_by_player(
     ownership_salary_by_name_team: Dict[Tuple[str, str], Dict[str, float]],
 ) -> Dict[str, Dict[str, float]]:
     """
-    Aggregate projected CPT/FLEX ownership by player name across teams.
+    Aggregate projected CPT / flex-style ownership by player name across teams.
     """
     projected: Dict[str, Dict[str, float]] = {}
     for (name, _team), info in ownership_salary_by_name_team.items():
@@ -773,13 +692,6 @@ def _add_ownership_columns_to_simulation(
 ) -> pd.DataFrame:
     """
     Add Sum Ownership and Salary-weighted Ownership columns to simulation_df.
-
-    Sum Ownership:
-        Sum of Sabersim CPT/FLEX ownership percentages for the six players.
-
-    Salary-weighted Ownership:
-        Sum over players of (salary * ownership_pct), scaled by 1,000 to keep
-        values human-readable.
     """
     if simulation_df.empty:
         result = simulation_df.copy()
@@ -828,10 +740,14 @@ def _add_ownership_columns_to_simulation(
 
 def _build_entrant_summary(
     simulation_df: pd.DataFrame,
+    flex_role_label: str,
 ) -> pd.DataFrame:
     """
-    Build entrant-level summary statistics from per-lineup simulation results.
+    Build entrant-level summary statistics from per-lineup simulation results,
+    including CPT and flex-style player usage percentages.
     """
+    flex_label_up = flex_role_label.upper()
+
     # Mean performance metrics by entrant.
     grouped = simulation_df.groupby("Entrant", as_index=False)
     agg_spec: Dict[str, str] = {
@@ -863,40 +779,129 @@ def _build_entrant_summary(
 
     summary = entries_df.merge(summary, on="Entrant", how="left")
 
-    # Final column ordering.
-    cols = ["Entrant", "Entries"]
+    # Early exit for empty input.
+    if summary.empty:
+        cols = ["Entrant", "Entries"]
+        if "Avg. Sim ROI" in summary.columns:
+            cols.append("Avg. Sim ROI")
+        cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
+        summary = summary.reindex(columns=[c for c in cols if c in summary.columns])
+        return summary
+
+    # Entrant-level CPT usage counts per player.
+    cpt_counts = (
+        simulation_df.groupby(["Entrant", "CPT"])
+        .size()
+        .unstack(fill_value=0)
+        .astype(float)
+    )
+
+    if not cpt_counts.empty:
+        entries_series = entries_df.set_index("Entrant")["Entries"].astype(float)
+        cpt_entries = entries_series.reindex(cpt_counts.index).replace(0.0, np.nan)
+        cpt_usage_pct = cpt_counts.div(cpt_entries, axis=0).fillna(0.0)
+
+        # Deterministic CPT column ordering by player name.
+        cpt_player_names = [str(name) for name in cpt_usage_pct.columns]
+        cpt_player_names_sorted = sorted(cpt_player_names)
+        cpt_usage_pct = cpt_usage_pct.reindex(columns=cpt_player_names_sorted)
+        cpt_usage_pct.columns = [f"CPT {name}" for name in cpt_player_names_sorted]
+
+        cpt_usage_pct = cpt_usage_pct.reset_index()
+        summary = summary.merge(cpt_usage_pct, on="Entrant", how="left")
+
+    # Entrant-level flex-style usage counts per player.
+    flex_cols = ["Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]
+    flex_cols_present = [col for col in flex_cols if col in simulation_df.columns]
+    if flex_cols_present:
+        flex_long = simulation_df.melt(
+            id_vars=["Entrant"],
+            value_vars=flex_cols_present,
+            var_name="slot",
+            value_name="Player",
+        )
+        # Drop missing player names, if any.
+        flex_long = flex_long.dropna(subset=["Player"])
+        flex_long["Player"] = flex_long["Player"].astype(str)
+
+        flex_counts = (
+            flex_long.groupby(["Entrant", "Player"])
+            .size()
+            .unstack(fill_value=0)
+            .astype(float)
+        )
+
+        if not flex_counts.empty:
+            entries_series = entries_df.set_index("Entrant")["Entries"].astype(float)
+            flex_entries = entries_series.reindex(flex_counts.index).replace(
+                0.0, np.nan
+            )
+            flex_usage_pct = flex_counts.div(flex_entries, axis=0).fillna(0.0)
+
+            # Deterministic flex column ordering by player name.
+            flex_player_names = [str(name) for name in flex_usage_pct.columns]
+            flex_player_names_sorted = sorted(flex_player_names)
+            flex_usage_pct = flex_usage_pct.reindex(columns=flex_player_names_sorted)
+            flex_usage_pct.columns = [
+                f"{flex_label_up} {name}" for name in flex_player_names_sorted
+            ]
+
+            flex_usage_pct = flex_usage_pct.reset_index()
+            summary = summary.merge(flex_usage_pct, on="Entrant", how="left")
+
+    # Replace any NaNs in usage columns with 0.0.
+    usage_cols = [
+        col
+        for col in summary.columns
+        if col.startswith("CPT ") or col.startswith(f"{flex_label_up} ")
+    ]
+    if usage_cols:
+        summary[usage_cols] = summary[usage_cols].fillna(0.0)
+
+    # Final column ordering: base columns, then all CPT usage columns, then flex usage.
+    base_cols = ["Entrant", "Entries"]
     if "Avg. Sim ROI" in summary.columns:
-        cols.append("Avg. Sim ROI")
-    cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
-    summary = summary[cols]
+        base_cols.append("Avg. Sim ROI")
+    base_cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
+
+    cpt_usage_cols = sorted([c for c in summary.columns if c.startswith("CPT ")])
+    flex_usage_cols = sorted(
+        [c for c in summary.columns if c.startswith(f"{flex_label_up} ")]
+    )
+
+    ordered_cols = [c for c in base_cols if c in summary.columns]
+    ordered_cols.extend(cpt_usage_cols)
+    ordered_cols.extend(flex_usage_cols)
+
+    summary = summary.reindex(columns=ordered_cols)
     return summary
 
 
 def _build_player_summary(
     simulation_df: pd.DataFrame,
     projected_ownership_by_player: Dict[str, Dict[str, float]],
+    *,
+    flex_role_label: str,
 ) -> pd.DataFrame:
     """
     Build player-level summary statistics from per-lineup simulation results.
-
-    Expected columns in simulation_df:
-        Entrant, CPT, Flex1..Flex5, Top 1%, Top 20%.
     """
     num_lineups = len(simulation_df)
     if num_lineups == 0:
+        flex_label_up = flex_role_label.upper()
         return pd.DataFrame(
             columns=[
                 "Player",
                 "CPT draft %",
                 "CPT proj ownership",
-                "FLEX draft %",
-                "FLEX proj ownership",
+                f"{flex_label_up} draft %",
+                f"{flex_label_up} proj ownership",
                 "CPT Sim ROI",
-                "FLEX Sim ROI",
+                f"{flex_label_up} Sim ROI",
                 "CPT top 1% rate",
-                "FLEX top 1% rate",
+                f"{flex_label_up} top 1% rate",
                 "CPT top 20% rate",
-                "FLEX top 20% rate",
+                f"{flex_label_up} top 20% rate",
             ]
         )
 
@@ -921,7 +926,7 @@ def _build_player_summary(
             records.append(
                 {
                     "Player": name,
-                    "role": "FLEX",
+                    "role": flex_role_label.upper(),
                     "Top 1%": top1,
                     "Top 20%": top20,
                     "Sim ROI": sim_roi,
@@ -931,8 +936,9 @@ def _build_player_summary(
     long_df = pd.DataFrame(records)
 
     # Draft percentages by role.
+    flex_label_up = flex_role_label.upper()
     cpt_counts = long_df[long_df["role"] == "CPT"]["Player"].value_counts()
-    flex_counts = long_df[long_df["role"] == "FLEX"]["Player"].value_counts()
+    flex_counts = long_df[long_df["role"] == flex_label_up]["Player"].value_counts()
 
     all_players = sorted(set(long_df["Player"].astype(str)))
     rows: List[Dict[str, object]] = []
@@ -945,7 +951,7 @@ def _build_player_summary(
         # Role-specific performance metrics.
         mask_player = long_df["Player"] == player
         sub_cpt = long_df[mask_player & (long_df["role"] == "CPT")]
-        sub_flex = long_df[mask_player & (long_df["role"] == "FLEX")]
+        sub_flex = long_df[mask_player & (long_df["role"] == flex_label_up)]
 
         def _safe_mean(series: pd.Series) -> float:
             return float(series.mean()) if not series.empty else 0.0
@@ -959,46 +965,77 @@ def _build_player_summary(
                 "Player": player,
                 "CPT draft %": cpt_draft,
                 "CPT proj ownership": float(proj.get("cpt_proj_own", 0.0)),
-                "FLEX draft %": flex_draft,
-                "FLEX proj ownership": float(proj.get("flex_proj_own", 0.0)),
+                f"{flex_label_up} draft %": flex_draft,
+                f"{flex_label_up} proj ownership": float(
+                    proj.get("flex_proj_own", 0.0)
+                ),
                 "CPT Sim ROI": _safe_mean(sub_cpt["Sim ROI"])
                 if "Sim ROI" in sub_cpt.columns
                 else 0.0,
-                "FLEX Sim ROI": _safe_mean(sub_flex["Sim ROI"])
+                f"{flex_label_up} Sim ROI": _safe_mean(sub_flex["Sim ROI"])
                 if "Sim ROI" in sub_flex.columns
                 else 0.0,
                 "CPT top 1% rate": _safe_mean(sub_cpt["Top 1%"]),
-                "FLEX top 1% rate": _safe_mean(sub_flex["Top 1%"]),
+                f"{flex_label_up} top 1% rate": _safe_mean(sub_flex["Top 1%"]),
                 "CPT top 20% rate": _safe_mean(sub_cpt["Top 20%"]),
-                "FLEX top 20% rate": _safe_mean(sub_flex["Top 20%"]),
+                f"{flex_label_up} top 20% rate": _safe_mean(sub_flex["Top 20%"]),
             }
         )
 
     return pd.DataFrame(rows)
 
 
-def run(
-    contest_csv: str | None = None,
-    sabersim_csv: str | None = None,
-    num_sims: int = 100_000,
-    random_seed: int | None = None,
-    payouts_csv: str | None = None,
+def run_flashback(
+    *,
+    contest_csv: str | None,
+    sabersim_csv: str | None,
+    num_sims: int,
+    random_seed: int | None,
+    payouts_csv: str | None,
+    config_module: Any,
+    load_sabersim_projections: Callable[[str | Path], pd.DataFrame],
+    simulate_corr_matrix_from_projections: Callable[[pd.DataFrame], pd.DataFrame],
+    name_col: str,
+    team_col: str,
+    salary_col: str,
+    dk_proj_col: str,
+    flex_role_label: str = "FLEX",
 ) -> Path:
     """
-    Execute the flashback contest simulation pipeline.
+    Execute the flashback contest simulation pipeline for a given sport.
 
-    Returns:
-        Path to the written output Excel workbook.
+    Args:
+        flex_role_label: Label used for non-CPT lineup slots when producing
+            player-level summaries (e.g., \"FLEX\" for NFL, \"UTIL\" for NBA).
     """
+    # Normalize flex role label for downstream use.
+    flex_role_label_up = flex_role_label.upper()
+
+    def _apply_column_formats(
+        worksheet: Any,
+        df: pd.DataFrame,
+        column_names: Sequence[str],
+        fmt,
+        *,
+        width: float = 12.0,
+    ) -> None:
+        """
+        Apply an xlsxwriter format to columns in a worksheet by dataframe column name.
+        """
+        for name in column_names:
+            if name not in df.columns:
+                continue
+            col_idx = df.columns.get_loc(name)
+            worksheet.set_column(col_idx, col_idx, width, fmt)
+
     # Resolve input paths.
-    contest_dir = config.DATA_DIR / "contests"
-    sabersim_dir = config.SABERSIM_DIR
+    contest_dir = config_module.DATA_DIR / "contests"
+    sabersim_dir = config_module.SABERSIM_DIR
 
     contest_path = _resolve_latest_csv(contest_dir, contest_csv)
     sabersim_path = _resolve_latest_csv(sabersim_dir, sabersim_csv)
 
-    # Extract contest_id from the contest standings filename, which is expected
-    # to follow the pattern 'contest-standings-{contest_id}.csv'.
+    # Extract contest_id from the contest standings filename.
     contest_filename = contest_path.name
     m = re.search(r"contest-standings-(\d+)\.csv$", contest_filename)
     if m:
@@ -1022,6 +1059,7 @@ def run(
         payouts_csv=payouts_csv,
         contest_id=str(contest_id),
         num_entries=num_entries,
+        data_dir=config_module.DATA_DIR,
     )
     if payout_result is not None:
         payouts_by_rank, entry_fee = payout_result
@@ -1034,20 +1072,18 @@ def run(
     )
 
     # Load Sabersim projections and build correlation matrix via simulation.
-    # sabersim_raw_df preserves the full CSV for projections/ownership sheets,
-    # while sabersim_df is FLEX-only and used for correlations.
     sabersim_raw_df = pd.read_csv(sabersim_path)
-    sabersim_df = build_corr_matrix_from_projections.load_sabersim_projections(
-        sabersim_path
-    )
+    sabersim_df = load_sabersim_projections(sabersim_path)
     print("Building player correlation matrix via simulation...")
-    corr_df = simulation_corr.simulate_corr_matrix_from_projections(sabersim_df)
+    corr_df = simulate_corr_matrix_from_projections(sabersim_df)
 
     # Build unified player universe and correlation matrix.
     universe_names, mu, sigma = _build_player_universe_from_sabersim_and_lineups(
         sabersim_df=sabersim_df,
         corr_df=corr_df,
         lineup_player_names=player_names_from_lineups,
+        name_col=name_col,
+        dk_proj_col=dk_proj_col,
     )
     corr_full = _build_full_correlation(universe_names, corr_df)
 
@@ -1063,7 +1099,7 @@ def run(
 
     # Simulate correlated player scores.
     rng = np.random.default_rng(
-        random_seed if random_seed is not None else config.SIM_RANDOM_SEED
+        random_seed if random_seed is not None else config_module.SIM_RANDOM_SEED
     )
     print(
         f"Simulating correlated DK scores for {len(universe_names)} players across "
@@ -1183,13 +1219,8 @@ def run(
         cols.insert(top1_idx, "Sim ROI")
         simulation_df = simulation_df[cols]
 
-    # ------------------------------------------------------------------
     # Compute stack label per lineup using Sabersim team info.
-    # ------------------------------------------------------------------
-    required_cols = {
-        build_corr_matrix_from_projections.SABERSIM_NAME_COL,
-        build_corr_matrix_from_projections.SABERSIM_TEAM_COL,
-    }
+    required_cols = {name_col, team_col}
     missing = required_cols.difference(sabersim_df.columns)
     if missing:
         raise KeyError(
@@ -1197,12 +1228,8 @@ def run(
             f"{sorted(missing)}."
         )
 
-    sabersim_names = sabersim_df[
-        build_corr_matrix_from_projections.SABERSIM_NAME_COL
-    ].astype(str)
-    sabersim_teams = sabersim_df[
-        build_corr_matrix_from_projections.SABERSIM_TEAM_COL
-    ].astype(str)
+    sabersim_names = sabersim_df[name_col].astype(str)
+    sabersim_teams = sabersim_df[team_col].astype(str)
     name_to_team: Dict[str, str] = (
         pd.DataFrame({"Name": sabersim_names, "Team": sabersim_teams})
         .drop_duplicates(subset=["Name"])
@@ -1211,6 +1238,8 @@ def run(
     )
 
     stack_labels: List[str] = []
+    from collections import Counter
+
     for _, row in simulation_df.iterrows():
         player_names = [
             str(row["CPT"]),
@@ -1253,7 +1282,11 @@ def run(
 
     # Ownership-driven lineup metrics and summaries.
     ownership_salary_by_name_team = _build_sabersim_ownership_and_salary(
-        sabersim_raw_df
+        sabersim_raw_df,
+        name_col=name_col,
+        team_col=team_col,
+        salary_col=salary_col,
+        proj_col=dk_proj_col,
     )
     projected_ownership_by_player = _build_projected_ownership_by_player(
         ownership_salary_by_name_team
@@ -1265,23 +1298,18 @@ def run(
     )
 
     # Entrant and player summaries.
-    entrant_summary_df = _build_entrant_summary(simulation_df)
+    entrant_summary_df = _build_entrant_summary(
+        simulation_df, flex_role_label=flex_role_label_up
+    )
     player_summary_df = _build_player_summary(
-        simulation_df, projected_ownership_by_player
+        simulation_df,
+        projected_ownership_by_player,
+        flex_role_label=flex_role_label_up,
     )
 
     # Output path.
-    flashback_dir = config.OUTPUTS_DIR / FLASHBACK_SUBDIR
+    flashback_dir = config_module.OUTPUTS_DIR / FLASHBACK_SUBDIR
     flashback_dir.mkdir(parents=True, exist_ok=True)
-    # Use contest_id from the contest standings CSV filename, which is expected to
-    # follow the pattern 'contest-standings-{contest_id}.csv'.
-    contest_filename = contest_path.name
-    m = re.search(r"contest-standings-(\d+)\.csv$", contest_filename)
-    if m:
-        contest_id = m.group(1)
-    else:
-        # Fallback: use the stem if pattern does not match.
-        contest_id = contest_path.stem
     output_path = flashback_dir / f"flashback_{contest_id}.xlsx"
 
     print(f"Writing flashback results to {output_path}...")
@@ -1292,78 +1320,93 @@ def run(
         entrant_summary_df.to_excel(writer, sheet_name="Entrant summary", index=False)
         player_summary_df.to_excel(writer, sheet_name="Player summary", index=False)
 
+        # Excel formatting for readability.
+        workbook = writer.book
+        ws_sim = writer.sheets.get("Simulation")
+        ws_entrant = writer.sheets.get("Entrant summary")
+        ws_player = writer.sheets.get("Player summary")
+
+        if workbook is not None:
+            pct_fmt = workbook.add_format({"num_format": "0.0%"})
+            num_fmt = workbook.add_format({"num_format": "0.00"})
+
+            # Simulation sheet formatting.
+            if ws_sim is not None:
+                sim_pct_cols = [
+                    "Top 1%",
+                    "Top 5%",
+                    "Top 20%",
+                    "Sim ROI",
+                    "Actual ROI",
+                ]
+                sim_num_cols = [
+                    "Avg Points",
+                    "Actual Points",
+                    "Duplicates",
+                    "Sum Ownership",
+                    "Salary-weighted Ownership",
+                ]
+                _apply_column_formats(ws_sim, simulation_df, sim_pct_cols, pct_fmt)
+                _apply_column_formats(ws_sim, simulation_df, sim_num_cols, num_fmt)
+
+            # Entrant summary sheet formatting.
+            if ws_entrant is not None:
+                entrant_pct_base = [
+                    "Avg. Top 1%",
+                    "Avg. Top 5%",
+                    "Avg. Top 20%",
+                    "Avg. Sim ROI",
+                ]
+                usage_pct_cols = [
+                    col
+                    for col in entrant_summary_df.columns
+                    if col.startswith("CPT ")
+                    or col.startswith(f"{flex_role_label_up} ")
+                ]
+                entrant_pct_cols = [
+                    col
+                    for col in entrant_pct_base
+                    if col in entrant_summary_df.columns
+                ] + usage_pct_cols
+                _apply_column_formats(
+                    ws_entrant, entrant_summary_df, entrant_pct_cols, pct_fmt
+                )
+
+                entrant_num_cols = [
+                    col
+                    for col in ["Entries", "Avg Points"]
+                    if col in entrant_summary_df.columns
+                ]
+                _apply_column_formats(
+                    ws_entrant, entrant_summary_df, entrant_num_cols, num_fmt
+                )
+
+            # Player summary sheet formatting.
+            if ws_player is not None:
+                flex_label_up = flex_role_label_up
+                player_pct_cols = [
+                    "CPT draft %",
+                    "CPT proj ownership",
+                    f"{flex_label_up} draft %",
+                    f"{flex_label_up} proj ownership",
+                    "CPT Sim ROI",
+                    f"{flex_label_up} Sim ROI",
+                    "CPT top 1% rate",
+                    f"{flex_label_up} top 1% rate",
+                    "CPT top 20% rate",
+                    f"{flex_label_up} top 20% rate",
+                ]
+                _apply_column_formats(
+                    ws_player, player_summary_df, player_pct_cols, pct_fmt
+                )
+
     print("Done.")
     return output_path
 
 
-def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Flashback contest simulation for completed NFL Showdown slates "
-            "using Sabersim projections and a correlation matrix."
-        )
-    )
-    parser.add_argument(
-        "--contest-csv",
-        type=str,
-        default=None,
-        help=(
-            "Path to contest standings CSV under data/contests/. "
-            "If omitted, the most recent .csv file in that directory is used."
-        ),
-    )
-    parser.add_argument(
-        "--sabersim-csv",
-        type=str,
-        default=None,
-        help=(
-            "Path to Sabersim projections CSV under data/sabersim/. "
-            "If omitted, the most recent .csv file in that directory is used."
-        ),
-    )
-    parser.add_argument(
-        "--payouts-csv",
-        type=str,
-        default=None,
-        help=(
-            "Path to DraftKings payout JSON for this contest under data/payouts/. "
-            "Despite the name, this flag expects the JSON format used in "
-            "payouts-*.json. If omitted, the script will look for "
-            "data/payouts/payouts-{contest_id}.json inferred from the contest "
-            "standings filename."
-        ),
-    )
-    parser.add_argument(
-        "--num-sims",
-        type=int,
-        default=100_000,
-        help="Number of Monte Carlo simulations to run (default: 100000).",
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=None,
-        help=(
-            "Optional random seed for reproducibility. "
-            "Defaults to config.SIM_RANDOM_SEED when omitted."
-        ),
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: List[str] | None = None) -> None:
-    args = _parse_args(argv)
-    run(
-        contest_csv=args.contest_csv,
-        sabersim_csv=args.sabersim_csv,
-        num_sims=args.num_sims,
-        random_seed=args.random_seed,
-        payouts_csv=args.payouts_csv,
-    )
-
-
-if __name__ == "__main__":
-    main()
-
+__all__ = [
+    "ParsedLineup",
+    "run_flashback",
+]
 
 

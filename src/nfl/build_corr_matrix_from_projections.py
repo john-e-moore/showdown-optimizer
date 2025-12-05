@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 """
-Sabersim projections loading utilities.
+NFL Sabersim projections loading utilities.
 
-This module provides a helper to load a Sabersim Showdown CSV and return a
-FLEX-only dataframe suitable for downstream simulation.
+This module provides helpers to:
+  - Load a Sabersim Showdown CSV and return a FLEX-only dataframe suitable
+    for downstream simulation.
+  - Map Sabersim projections into feature space compatible with the historical
+    correlation model (when DEFAULT_CORR_METHOD == \"ml\").
 """
 
 from pathlib import Path
+from typing import List
 
+import numpy as np
 import pandas as pd
 
 from . import config
@@ -51,7 +56,6 @@ def load_sabersim_projections(path: str | Path) -> pd.DataFrame:
         df = df[df[SABERSIM_POS_COL].isin(config.OFFENSIVE_POSITIONS)]
 
     return df
-
 
 
 def _prepare_player_features_from_sabersim(
@@ -107,8 +111,12 @@ def _prepare_player_features_from_sabersim(
         totals_by_team = (
             df.groupby(config.COL_TEAM)[config.COL_DK_POINTS].sum().to_dict()
         )
-        total_points = float(totals_by_team.get(t1, 0.0) + totals_by_team.get(t2, 0.0))
-        point_diff = float(abs(totals_by_team.get(t1, 0.0) - totals_by_team.get(t2, 0.0)))
+        total_points = float(
+            totals_by_team.get(t1, 0.0) + totals_by_team.get(t2, 0.0)
+        )
+        point_diff = float(
+            abs(totals_by_team.get(t1, 0.0) - totals_by_team.get(t2, 0.0))
+        )
     else:
         # Fallback for unexpected cases
         total_points = float(df[config.COL_DK_POINTS].sum())
@@ -142,6 +150,40 @@ def _prepare_player_features_from_sabersim(
     return df
 
 
+# Features expected by the historical ML model (when used)
+CATEGORICAL_FEATURES: List[str] = [
+    "A_" + config.COL_POSITION,
+    "B_" + config.COL_POSITION,
+    "A_" + config.COL_TEAM,
+    "B_" + config.COL_TEAM,
+]
+
+NUMERICAL_FEATURES: List[str] = [
+    "A_is_home",
+    "B_is_home",
+    "A_" + config.COL_MU_PLAYER,
+    "B_" + config.COL_MU_PLAYER,
+    "A_" + config.COL_SIGMA_PLAYER,
+    "B_" + config.COL_SIGMA_PLAYER,
+    "A_" + config.COL_DK_POINTS,
+    "B_" + config.COL_DK_POINTS,
+    "A_" + config.COL_DK_POINTS + "_mean_szn_to_date",
+    "B_" + config.COL_DK_POINTS + "_mean_szn_to_date",
+    "A_" + config.COL_PASS_YARDS + "_mean_szn_to_date",
+    "B_" + config.COL_PASS_YARDS + "_mean_szn_to_date",
+    "A_" + config.COL_RUSH_YARDS + "_mean_szn_to_date",
+    "B_" + config.COL_RUSH_YARDS + "_mean_szn_to_date",
+    "A_" + config.COL_REC_YARDS + "_mean_szn_to_date",
+    "B_" + config.COL_REC_YARDS + "_mean_szn_to_date",
+    "A_" + config.COL_RECEPTIONS + "_mean_szn_to_date",
+    "B_" + config.COL_RECEPTIONS + "_mean_szn_to_date",
+    config.COL_SEASON,
+    config.COL_WEEK,
+    "total_points",
+    "point_diff",
+]
+
+
 def build_corr_matrix_from_sabersim(
     model, sabersim_df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -153,19 +195,10 @@ def build_corr_matrix_from_sabersim(
     """
     players_df = _prepare_player_features_from_sabersim(sabersim_df)
 
-    # Build all unordered player pairs via self-merge
+    # Build all unordered player pairs via Cartesian product and filter to i < j.
     players_df = players_df.reset_index(drop=True)
     players_df["idx"] = players_df.index
 
-    pair_df = players_df.merge(
-        players_df,
-        how="inner",
-        left_on="idx",
-        right_on="idx",
-        suffixes=("_A", "_B"),
-    )
-
-    # Alternatively, construct a true Cartesian product and filter to i < j
     pair_df = players_df.merge(
         players_df,
         how="cross",
@@ -261,5 +294,6 @@ def build_corr_matrix_from_sabersim(
         corr_mat.at[b, a] = corr
 
     return corr_mat
+
 
 

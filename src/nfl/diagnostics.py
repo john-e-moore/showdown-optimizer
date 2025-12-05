@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 """
-Lightweight diagnostics helpers for writing dataframe snapshots and summaries.
+Lightweight diagnostics helpers for writing dataframe snapshots and summaries
+for the NFL pipelines.
 
-Snapshots are written under the project-level `diagnostics/` directory, grouped
-by pipeline step. Each snapshot consists of:
-  - A Parquet file with up to `max_rows` rows.
+Snapshots are written under the NFL diagnostics directory, grouped by pipeline
+step. Each snapshot consists of:
+  - A CSV file with up to `max_rows` rows.
   - A JSON summary with row/column counts, dtypes, and simple stats for key
     categorical columns (season, week, team, position) when present.
 """
 
 import json
 from pathlib import Path
-from typing import Iterable, Mapping, Any
+from typing import Mapping, Any
 
 import pandas as pd
 
@@ -43,9 +44,9 @@ def write_df_snapshot(
     name : str
         Logical name for this dataframe (e.g. \"player_games\", \"pairwise\").
     step : str
-        Pipeline step identifier (e.g. \"load\", \"fantasy_scoring\").
+        Pipeline step identifier (e.g. \"load\", \"simulation\").
     max_rows : int, optional
-        Maximum number of rows to persist in the Parquet snapshot.
+        Maximum number of rows to persist in the CSV snapshot.
     """
     if not config.ENABLE_DIAGNOSTICS:
         return

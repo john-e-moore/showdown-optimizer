@@ -1,368 +1,476 @@
-## NFL Showdown Correlation Pipeline
+## Showdown Optimizer – Overview
 
-This project implements a simulation-based pipeline for modeling player-to-player
-fantasy point correlations for DraftKings NFL Showdown contests.
+This repository is organized around a small number of Python packages under `src/`
+to clearly separate shared logic from sport-specific code:
 
-The core of the project is a Monte Carlo simulator that uses Sabersim
-box-score projections to generate many joint game outcomes and computes an
-empirical correlation matrix of DraftKings fantasy points. A separate helper
-script can optionally download and normalize historical NFL data for your own
-analysis, but no ML model training is required for the correlation pipeline.
+- **`src/shared/` – sport-agnostic cores and utilities**
+  - `config_base.py`: project root, data/outputs/diagnostics/model directories, and
+    helpers like `get_data_dir_for_sport`.
+  - `optimizer_core.py`: generic Showdown MILP optimizer (no NFL/NBA assumptions).
+  - `lineup_optimizer.py`: thin adapter that loads Sabersim CSVs into the shared
+    optimizer core.
+  - `dkentries_core.py`: shared logic for working with DraftKings DKEntries CSVs
+    (resolving templates, mapping Name/ID/roster positions, fee-aware lineup
+    assignment, etc.).
+  - `top1pct_core.py`: core engine for estimating top 1% finish rates given
+    correlation matrices, ownership, and projections.
+  - `flashback_core.py`: core engine for flashback simulations on completed
+    contests (parsing exported lineups, simulating correlated scores, computing
+    ROI and finish rates).
 
-### Project layout
+- **`src/nfl/` – NFL-specific configuration and CLIs**
+  - `config.py`: NFL paths (e.g. `data/nfl`, `outputs/nfl`), column names, and
+    simulation hyperparameters.
+  - `data_loading.py`, `diagnostics.py`: nflverse-style Parquet loaders and
+    diagnostics that use the NFL config.
+  - `build_corr_matrix_from_projections.py`, `simulation_corr.py`: NFL Sabersim
+    loader and Monte Carlo correlation engine.
+  - **Primary CLIs (used via `python -m src.nfl.<module>`):**
+    - `main`: build correlations from Sabersim.
+    - `showdown_optimizer_main`: NFL Showdown optimizer.
+    - `top1pct_finish_rate`: top 1% finish-rate estimation for NFL.
+    - `diversify_lineups`: select diversified NFL lineups from top1% output.
+    - `flashback_sim`: flashback contest simulation for completed NFL slates.
+    - `fill_dkentries`: fill DKEntries templates with diversified NFL lineups.
+    - `download_nfl_data`: download and normalize historical NFL data.
 
-- `data/nfl_raw/`: nflverse Parquet files (player stats and games/schedule).
-- `data/sabersim/`: Sabersim Showdown projections CSVs.
-- `outputs/correlations/`: Excel outputs with projections + correlation matrix.
-- `src/`: Python package with all pipeline and diagnostics code.
+- **`src/nba/` – NBA-specific configuration and CLIs**
+  - `config.py`: NBA paths (e.g. `data/nba`, `outputs/nba`) and any NBA-specific
+    knobs.
+  - `sabersim_parser.py`, `simulation_corr.py`, `stat_sim.py`: NBA Sabersim
+    parsing and correlation/stat simulation.
+  - **Primary CLIs (used via `python -m src.nba.<module>`):**
+    - `main`: NBA correlation pipeline.
+    - `showdown_optimizer_main`: NBA Showdown optimizer.
+    - `top1pct_finish_rate_nba`: NBA top 1% finish-rate estimation.
+    - `diversify_lineups_nba`: select diversified NBA lineups from top1% output.
+    - `flashback_sim_nba`: flashback contest simulation for NBA.
+    - `fill_dkentries_nba`: fill DKEntries templates with diversified NBA lineups.
 
-### Dependencies
+In day-to-day use, prefer the sport-specific entrypoints under `src/nfl` and
+`src/nba` (e.g. `python -m src.nfl.showdown_optimizer_main ...`) while treating
+`src/shared` as an implementation detail that you rarely need to call directly.
 
-Use Python 3.10+ and install dependencies with:
+The `run_full.sh` script wires many of these steps together into an end‑to‑end
+pipeline, but each module can also be run individually as documented below.
+
+---
+
+## Environment and Installation
+
+- **Python**: Use a recent Python 3 (3.10+ recommended).
+- **Install dependencies** from the project root:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate          # on Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Key libraries:
-- `pandas`, `numpy` for data handling.
-- `xlsxwriter` for Excel output.
-- `pyarrow` for Parquet IO.
-- `nfl_data_py` for downloading historical NFL data.
+All commands below assume you run them **from the project root**
+(`showdown-optimizer/`) so that `src/` is importable.
 
-### Configuration
+---
 
-Edit `src/config.py` if needed to point to your local Parquet files and
-Sabersim CSVs. By default it expects:
+## NFL Modules – How to Run (with Flags)
 
-- Player stats Parquet: `data/nfl_raw/player_stats.parquet`
-- Games/schedule Parquet: `data/nfl_raw/games.parquet`
-- Sabersim CSV: `data/sabersim/NFL_2025-11-24-815pm_DK_SHOWDOWN_CAR-@-SF.csv`
-- Output Excel: `outputs/correlations/showdown_corr_matrix.xlsx`
-
-You can also adjust:
-- Offensive positions to include.
-- Simulation settings:
-  - `SIM_N_GAMES` (number of Monte Carlo simulations).
-  - `SIM_RANDOM_SEED` (seed or `None` for nondeterministic).
-  - `SIM_DIRICHLET_K_YARDS`, `SIM_DIRICHLET_K_RECEPTIONS`,
-    `SIM_DIRICHLET_K_TDS` (how tightly simulated stat shares cluster around
-    projections).
-
-### Downloading historical NFL data (optional)
-
-If you want local Parquet files of historical NFL games and player stats for
-your own analysis, you can populate `data/nfl_raw/` using `nfl_data_py`:
+All NFL commands use the form:
 
 ```bash
-python -m src.download_nfl_data --start-season 2005 --end-season 2024
+python -m src.nfl.<module> [FLAGS...]
 ```
 
-This will create:
-- `data/nfl_raw/player_stats.parquet`
-- `data/nfl_raw/games.parquet`
+### NFL correlation pipeline – `src.nfl.main`
 
-The downloader normalizes columns so they align with `src/config.py`.
+Build a player correlation matrix from a Sabersim Showdown CSV.
 
-### Running the correlation pipeline (simulation-based)
-
-From the project root:
+- **Command:**
 
 ```bash
-python -m src.main
+python -m src.nfl.main \
+  --sabersim-csv data/nfl/sabersim/NFL_<slate>.csv \
+  --output-excel outputs/nfl/correlations/showdown_corr_matrix.xlsx \
+  --n-sims 100000
 ```
 
-By default this will:
-1. Load Sabersim projections from `config.SABERSIM_CSV`.
-2. Run `SIM_N_GAMES` Monte Carlo simulations of team-level stat pools and
-   allocate them to players using Dirichlet/multinomial sampling.
-3. Compute the empirical correlation matrix of DK fantasy points across all
-   FLEX players in that slate.
-4. Write an Excel file to `config.OUTPUT_CORR_EXCEL` with:
-   - Sheet `Sabersim_Projections`: FLEX-only Sabersim projections.
-   - Sheet `Correlation_Matrix`: symmetric correlation matrix with
-     player names as both rows and columns.
+- **Flags:**
+  - **`--sabersim-csv`**: Path to Sabersim Showdown projections CSV.
+    - Default: `src.nfl.config.SABERSIM_CSV` (typically under `data/nfl/sabersim/`).
+  - **`--output-excel`**: Output Excel with projections + correlation matrix.
+    - Default: `src.nfl.config.OUTPUT_CORR_EXCEL` (under `outputs/nfl/correlations/`).
+  - **`--n-sims`**: Number of Monte Carlo simulations to run.
+    - Default: `src.nfl.config.SIM_N_GAMES`.
 
-You can override the Sabersim CSV, number of simulations, and output paths:
+### NFL Showdown optimizer – `src.nfl.showdown_optimizer_main`
 
-```bash
-python -m src.main \
-  --sabersim-csv data/sabersim/your_showdown_file.csv \
-  --n-sims 8000 \
-  --output-excel outputs/correlations/your_corr_matrix.xlsx
-```
+Generate optimized NFL Showdown lineups from a Sabersim CSV.
 
-### Running the lineup optimizer (MILP-based)
-
-From the project root, after installing dependencies:
+- **Basic example:**
 
 ```bash
-python -m src.showdown_optimizer_main \
-  --sabersim-glob "data/sabersim/NFL_*.csv" \
-  --num-lineups 20 \
+python -m src.nfl.showdown_optimizer_main \
+  --sabersim-glob "data/nfl/sabersim/NFL_*.csv" \
+  --num-lineups 50 \
   --salary-cap 50000
 ```
 
-This will:
-- Load Sabersim projections from the CSV matched by `--sabersim-glob`.
-- Build valid DraftKings Showdown lineups (1 CPT, 5 FLEX, 6 distinct players).
-- Maximize mean projected DK fantasy points under the given salary cap.
+- **Flags:**
+  - **`--sabersim-glob`**: Glob/path to Sabersim Showdown projections CSV.
+    - Must resolve to **exactly one** file.
+    - Default: `str(config.SABERSIM_DIR / "NFL_*.csv")`.
+  - **`--num-lineups`**: Number of lineups to generate.
+    - Default: `20`.
+  - **`--salary-cap`**: DraftKings Showdown salary cap.
+    - Default: `50000`.
+  - **`--chunk-size`**: Lineups solved per MILP chunk when generating many lineups.
+    - Default: `50`.
+    - Set `<= 0` to disable chunking and use a single growing model.
+  - **`--stack-mode`**: Team stacking mode.
+    - Choices: `"none"` (default), `"multi"`.
+    - `"none"`: single optimization pass with generic constraints.
+    - `"multi"`: splits `--num-lineups` across patterns `5|1, 4|2, 3|3, 2|4, 1|5`.
+  - **`--stack-weights`**: Optional weights for multi-stack mode.
+    - Example: `"5|1=0.3,4|2=0.25,3|3=0.2,2|4=0.15,1|5=0.1"`.
+    - If omitted in `"multi"` mode, all stack patterns are weighted equally.
 
-You can also control how many lineups are solved per MILP model using the
-`--chunk-size` flag:
+- **Output:**
+  - Writes an Excel workbook under `outputs/nfl/lineups/lineups_<timestamp>.xlsx`
+    with sheets for projections, ownership, exposure, and lineups.
+
+### NFL top 1% finish rate – `src.nfl.top1pct_finish_rate`
+
+Estimate top 1% finish probabilities for a set of lineups using correlations +
+ownership.
+
+- **Minimal example (auto-resolve latest inputs):**
 
 ```bash
-python -m src.showdown_optimizer_main \
-  --sabersim-glob "data/sabersim/NFL_*.csv" \
-  --num-lineups 5000 \
-  --salary-cap 50000 \
-  --chunk-size 50
+python -m src.nfl.top1pct_finish_rate --field-size 23529
 ```
 
-With chunking enabled, the optimizer:
-- Solves for lineups in batches of `--chunk-size`, rebuilding a fresh MILP for
-  each batch to keep model size roughly constant.
-- Applies a projection cap between batches so that each new batch targets
-  lineups strictly below the worst projection from the previous batch.
-
-Setting `--chunk-size` to `0` (or a negative value) disables chunking and
-reverts to the original behavior that uses a single model with a growing set of
-no-duplicate constraints.
-
-You can optionally enable **multi-stack mode** to force a mix of team stacks
-across the generated lineups. For example, to generate 1000 lineups split
-equally across 5|1, 4|2, 3|3, 2|4, and 1|5 team stacks:
+- **Explicit input example:**
 
 ```bash
-python -m src.showdown_optimizer_main \
-  --sabersim-glob "data/sabersim/NFL_*.csv" \
-  --num-lineups 1000 \
-  --salary-cap 50000 \
-  --chunk-size 50 \
-  --stack-mode multi
-```
-
-In `--stack-mode multi`, the optimizer:
-- Assumes a standard two-team Showdown slate.
-- Splits `--num-lineups` across the five stack patterns
-  (`5|1`, `4|2`, `3|3`, `2|4`, `1|5`) according to configurable weights.
-- Runs the MILP once per pattern with an additional team-level stack constraint.
-- Deduplicates lineups across all runs and writes a **single** Excel workbook
-  as before.
-
-You can customize the relative frequency of each stack pattern using
-`--stack-weights`. For example:
-
-```bash
-python -m src.showdown_optimizer_main \
-  --sabersim-glob "data/sabersim/NFL_*.csv" \
-  --num-lineups 1000 \
-  --salary-cap 50000 \
-  --chunk-size 50 \
-  --stack-mode multi \
-  --stack-weights "5|1=0.4,4|2=0.3,3|3=0.2,2|4=0.1,1|5=0.0"
-```
-
-`--stack-weights` values are normalized to sum to 1. Patterns omitted or set to
-0 receive no lineups (other than potential rounding leftovers, which are
-distributed among patterns with positive weights).
-
-In the resulting `Lineups` sheet, an extra column
-`target_stack_pattern` records which stack configuration/run produced each
-lineup (e.g., `5|1_KC-heavy`, `3|3`, `2|4_SF-heavy`). The existing `stack`
-column still reflects the actual team counts (e.g., `5|1`, `4|2`, `3|3`) and is
-used by downstream tools like `src.top1pct_finish_rate.py`.
-
-
-### Estimating top 1% finish probabilities for lineups
-
-After generating a correlation workbook and a lineup workbook, you can
-estimate the probability that each lineup finishes in the top 1% of a
-large-field DraftKings Showdown contest.
-
-From the project root:
-
-```bash
-python -m src.top1pct_finish_rate --field-size 23529
-```
-
-This will:
-- Automatically pick the most recent `.xlsx` in `outputs/lineups/` as the
-  lineup workbook.
-- Automatically pick the most recent `.xlsx` in `outputs/correlations/` as
-  the correlation workbook.
-- Simulate correlated DK outcomes for all players.
-- Use ownership projections to approximate the field's score distribution in
-  each simulation.
-- Write an Excel file to `outputs/top1pct/` with:
-  - Sheet `Lineups_Top1Pct`: original lineups plus a new column
-    `top1_pct_finish_rate` (percentage of simulations where the lineup beats
-    the modeled top 1% cutoff).
-  - Sheet `Meta`: basic metadata including field size, number of simulations,
-    and paths to the input workbooks.
-
-You can also specify the input workbooks explicitly:
-
-```bash
-python -m src.top1pct_finish_rate \
+python -m src.nfl.top1pct_finish_rate \
   --field-size 23529 \
-  --lineups-excel outputs/lineups/lineups_YYYYMMDD_HHMMSS.xlsx \
-  --corr-excel outputs/correlations/showdown_corr_matrix.xlsx
+  --lineups-excel outputs/nfl/lineups/lineups_YYYYMMDD_HHMMSS.xlsx \
+  --corr-excel outputs/nfl/correlations/showdown_corr_matrix.xlsx \
+  --num-sims 100000 \
+  --field-var-shrink 0.7 \
+  --field-z 2.0 \
+  --flex-var-factor 3.5
 ```
 
-The reported probabilities can be interpreted as the chance that a lineup
-finishes inside the top `floor(field_size * 0.01)` entries, under the
-ownership and correlation model described in
-`prompts/02_top1pct_finish_rate.md`.
+- **Flags:**
+  - **`--field-size`** (required): Total number of lineups in the contest field.
+  - **`--lineups-excel`**: Path to lineups workbook under `outputs/nfl/lineups/`.
+    - Default: most recent `.xlsx` in that directory.
+  - **`--corr-excel`**: Path to correlations workbook under
+    `outputs/nfl/correlations/`.
+    - Default: most recent `.xlsx` in that directory.
+  - **`--num-sims`**: Number of Monte Carlo simulations.
+    - Default: `100000`.
+  - **`--field-var-shrink`**: Shrinkage factor for modeled field variance
+    (\(0 < \text{value} \le 1\)).
+    - Default: `0.7`.
+  - **`--field-z`**: Z-score for upper tail of field score distribution.
+    - Default: `2.0`.
+  - **`--flex-var-factor`**: Effective variance factor for aggregate FLEX
+    component (<= 5.0).
+    - Default: `3.5`.
+  - **`--random-seed`**: Optional random seed for reproducibility.
+    - Default: `None` (falls back to `config.SIM_RANDOM_SEED`).
 
-You can optionally tune the calibration of the field distribution:
+- **Output:**
+  - Writes a top1% workbook under `outputs/nfl/top1pct/` (exact path is printed).
 
-- `--field-var-shrink`: multiplicative shrinkage on the modeled field variance
-  (default `0.7`). Values closer to `0` pull the top 1% cutoff closer to the
-  mean field score; values near `1` use the raw variance.
-- `--field-z`: z-score applied to the (shrunken) field standard deviation
-  (default `2.0`, slightly below the canonical 99th percentile `2.326`).
-- `--flex-var-factor`: effective variance factor for the aggregate FLEX
-  component (default `3.5`, vs. `5.0` for five independent FLEX slots).
+### NFL lineup diversification – `src.nfl.diversify_lineups`
 
-These knobs are intended to produce **realistic relative rankings** of lineups
-by top-1% finish probability (e.g., best lineups a few percent, weakest near
-zero), not perfectly calibrated absolute probabilities.
+Select a diversified subset of top1%-rated lineups, enforcing a max overlap.
 
-### Selecting diversified lineups based on top 1% finish rate
-
-Once `outputs/top1pct/` contains a workbook with `Lineups_Top1Pct` (from
-`src.top1pct_finish_rate`), you can select a diversified subset of lineups that:
-
-- Filters out weak lineups with `top1_pct_finish_rate < 1%`.
-- Prefers higher `top1_pct_finish_rate` lineups.
-- Enforces a maximum allowed player overlap between any pair of selected lineups.
-
-From the project root:
+- **Example:**
 
 ```bash
-python -m src.diversify_lineups \
-  --num-lineups 50 \
+python -m src.nfl.diversify_lineups \
+  --num-lineups 150 \
   --min-top1-pct 1.0 \
   --max-overlap 4
 ```
 
-This will:
+- **Flags:**
+  - **`--num-lineups`** (required): Number of lineups to select.
+  - **`--min-top1-pct`**: Minimum `top1_pct_finish_rate` (in percent)
+    required to keep a lineup.
+    - Default: `1.0`.
+  - **`--max-overlap`**: Maximum overlapping players allowed between any pair
+    of selected lineups (\(0\)–\(6\) for Showdown).
+    - Default: `4`.
+  - **`--top1pct-excel`**: Path to a top1% workbook under `outputs/nfl/top1pct/`.
+    - Default: most recent `.xlsx` in that directory.
 
-- Load the most recent `.xlsx` in `outputs/top1pct/` and read the
-  `Lineups_Top1Pct` sheet.
-- Keep only lineups with `top1_pct_finish_rate >= min-top1-pct`.
-- Represent each lineup as the set of its six players (CPT + 5 FLEX).
-- Greedily select up to `--num-lineups` lineups in descending
-  `top1_pct_finish_rate` (breaking ties by `lineup_projection` when available),
-  only accepting a lineup if its overlap with every already-selected lineup is
-  at most `--max-overlap` shared players.
-- Write the selected lineups to
-  `outputs/top1pct/top1pct_diversified_{num_lineups}.xlsx` with sheet
-  `Lineups_Diversified`.
+- **Output:**
+  - Writes a diversified lineups workbook under `outputs/nfl/top1pct/`
+    (sheet `Lineups_Diversified`).
 
-Typical choices:
+### NFL flashback simulation – `src.nfl.flashback_sim`
 
-- Use `--min-top1-pct 1.0` to discard lineups with very low modeled upside.
-- Use `--max-overlap` between 3 and 5 to control how aggressively you diversify
-  player combinations across the final portfolio.
+Run a flashback contest simulation for a completed NFL Showdown slate.
 
-### Flashback contest simulation for completed Showdown contests
-
-You can analyze a **completed** DraftKings Showdown contest using the same
-correlation engine via `src.flashback_sim`. This script:
-
-- Loads a finished contest CSV from `data/contests/`.
-- Loads matching Sabersim projections from `data/sabersim/`.
-- Rebuilds a player correlation matrix from the Sabersim projections.
-- Simulates correlated DK scores for all players and scores every contest lineup.
-- Writes an Excel workbook under `outputs/flashback/` with:
-  - `Standings`: original contest CSV.
-  - `Simulation`: CPT/FLEX players, **Sim ROI**, Top 1% / Top 5% / Top 20% finish
-    rates, and average DK points per lineup (plus actual points/ROI when the
-    payout file is available).
-  - `Entrant summary`: average metrics across entries per entrant, including
-    **Avg. Sim ROI** when payouts are available.
-  - `Player summary`: draft rates and performance by role (CPT vs FLEX),
-    including **CPT Sim ROI** and **FLEX Sim ROI** when payouts are available.
-
-From the project root, if you have a contest CSV in `data/contests/` and a
-matching Sabersim CSV in `data/sabersim/`, you can run:
+- **Example:**
 
 ```bash
-python -m src.flashback_sim
+python -m src.nfl.flashback_sim \
+  --contest-csv data/nfl/contests/contest_<id>.csv \
+  --sabersim-csv data/nfl/sabersim/NFL_<slate>.csv \
+  --payouts-csv data/nfl/payouts/payouts_<id>.json \
+  --num-sims 100000
 ```
 
-To specify the exact inputs and number of simulations:
+- **Flags:**
+  - **`--contest-csv`**: Contest standings CSV under `data/nfl/contests/`.
+    - Default: most recent `.csv` in that directory.
+  - **`--sabersim-csv`**: Sabersim projections CSV under `data/nfl/sabersim/`.
+    - Default: most recent `.csv` in that directory.
+  - **`--payouts-csv`**: DraftKings payout JSON under `data/nfl/payouts/`.
+    - Despite the name, this flag expects a JSON file (`payouts-*.json`).
+    - Default: inferred from contest filename or downloaded if missing.
+  - **`--num-sims`**: Number of Monte Carlo simulations.
+    - Default: `100000`.
+  - **`--random-seed`**: Optional random seed.
+    - Default: `None` (falls back to `config.SIM_RANDOM_SEED`).
+
+- **Output:**
+  - Writes flashback outputs under `outputs/nfl/flashback/` (exact paths printed).
+
+### NFL DKEntries filler – `src.nfl.fill_dkentries`
+
+Fill a DKEntries CSV template with diversified lineups and write an
+upload‑ready file plus exposure summaries.
+
+- **Example:**
 
 ```bash
-python -m src.flashback_sim \
-  --contest-csv data/contests/my_contest.csv \
-  --sabersim-csv data/sabersim/my_slate.csv \
-  --num-sims 20000 \
-  --payouts-csv data/payouts/payouts-123456789.json
+python -m src.nfl.fill_dkentries \
+  --dkentries-csv data/nfl/dkentries/DKEntries_<slate>.csv \
+  --diversified-excel outputs/nfl/top1pct/top1pct_YYYYMMDD_HHMMSS.xlsx
 ```
 
-If `--contest-csv` or `--sabersim-csv` are omitted, the script will
-automatically pick the most recent `.csv` in the corresponding directory.
+- **Flags:**
+  - **`--dkentries-csv`**: Explicit DKEntries CSV path.
+    - Default: latest `DKEntries*.csv` under `data/nfl/dkentries/`.
+  - **`--diversified-excel`**: Top1% workbook containing `Lineups_Diversified`.
+    - Default: latest `.xlsx` under `outputs/nfl/top1pct/`.
+  - **`--output-csv`**: Explicit output CSV path.
+    - Default: timestamped folder under `outputs/nfl/dkentries/`.
 
-If `--payouts-csv` is omitted, the script will first look for a DraftKings payout
-JSON named `payouts-{contest_id}.json` under `data/payouts/`, where
-`{contest_id}` comes from the contest standings filename (e.g.,
-`contest-standings-185418998.csv` → `payouts-185418998.json`). If that file does
-not exist, `src.flashback_sim` will automatically call the DraftKings payouts
-endpoint
-`https://api.draftkings.com/contests/v1/contests/{contest_id}?format=json`,
-save the response to `data/payouts/payouts-{contest_id}.json`, and then use it
-for ROI computation. If the download fails (e.g., network error, non-200 HTTP
-status, or malformed JSON), the script falls back to skipping ROI computation as
-before. The **Sim ROI** values are defined as:
+- **Output:**
+  - Creates a timestamped directory under `outputs/nfl/dkentries/<YYYYMMDD_HHMMSS>/`
+    containing:
+    - `dkentries.csv`: DK upload‑ready file.
+    - `diversified.csv`: diversified lineups used.
+    - `ownership.csv`: realized ownership summary.
 
-\[
-\text{ROI} = \frac{\mathbb{E}[\text{payout}] - \text{entry fee}}{\text{entry fee}}
-\]
+### NFL historical data downloader – `src.nfl.download_nfl_data`
 
-so `0.5` means +50% ROI and negative values mean losing money on average.
+Download historical NFL weekly stats and game schedules via `nfl_data_py` and
+write normalized Parquet files.
 
-### End-to-end pipeline with run_full.sh
-
-You can run the full four-step pipeline (correlation → lineups → top1% →
-diversified portfolio → DKEntries fill) with the provided helper script:
+- **Example:**
 
 ```bash
-./run_full.sh PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]
+python -m src.nfl.download_nfl_data \
+  --start-season 2005 \
+  --end-season 2024 \
+  --overwrite
 ```
 
-Where:
+- **Flags:**
+  - **`--start-season`**: First season to include.
+    - Default: `2005`.
+  - **`--end-season`**: Last season to include (inclusive).
+    - Default: current year.
+  - **`--overwrite`**: If present, overwrite existing Parquet outputs.
 
-- `FIELD_SIZE` (optional) is the contest size used for the top 1% threshold.
-- `NUM_LINEUPS` (optional) is the number of MILP-optimized lineups to generate.
-- `SALARY_CAP` (optional) is the DK Showdown salary cap (default `50000`).
-- `STACK_MODE` (optional) controls stacking behavior for the optimizer
-  (`none` or `multi`).
-- `STACK_WEIGHTS` (optional) are the multi-stack pattern weights passed through
-  to `src.showdown_optimizer_main`.
-<<<<<<< HEAD
-- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select;
-  it defaults to `NUM_LINEUPS` when omitted.
-=======
-- `DIVERSIFIED_NUM` (optional) is the number of diversified lineups to select.
-  If provided explicitly, it is used as-is. When omitted, the script defaults
-  to the number of entries in the latest `DKEntries*.csv` under
-  `data/dkentries/`.
->>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
+- **Output:**
+  - Writes Parquet files to locations configured in `src.nfl.config`, typically
+    under `data/nfl/`.
 
-The script will:
+---
 
-1. Build a correlation workbook under `outputs/correlations/`.
-2. Generate a lineup workbook under `outputs/lineups/`.
-3. Estimate top 1% finish probabilities into `outputs/top1pct/`.
-4. Select a diversified subset of `DIVERSIFIED_NUM` lineups based on
-   `top1_pct_finish_rate` and player-overlap constraints.
-<<<<<<< HEAD
-=======
-5. Fill the latest DKEntries CSV template from `data/dkentries/` with the
-   selected diversified lineups, writing a DK-upload-ready CSV (with lineup
-   slots formatted as `{player_name} ({player_id})`) under `outputs/dkentries/`.
->>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
+## NBA Modules – How to Run (with Flags)
+
+All NBA commands use the form:
+
+```bash
+python -m src.nba.<module> [FLAGS...]
+```
+
+### NBA correlation pipeline – `src.nba.main`
+
+Build a player correlation matrix from an NBA Sabersim Showdown CSV.
+
+- **Example:**
+
+```bash
+python -m src.nba.main \
+  --sabersim-csv data/nba/sabersim/NBA_<slate>.csv \
+  --output-excel outputs/nba/correlations/showdown_corr_matrix.xlsx \
+  --n-sims 100000
+```
+
+- **Flags:**
+  - **`--sabersim-csv`**: Path to NBA Sabersim projections CSV.
+    - Default: `src.nba.config.SABERSIM_CSV`.
+  - **`--output-excel`**: Output Excel with projections + correlation matrix.
+    - Default: `src.nba.config.OUTPUT_CORR_EXCEL`.
+  - **`--n-sims`**: Number of Monte Carlo simulations.
+    - Default: `src.nba.config.SIM_N_GAMES`.
+
+### NBA Showdown optimizer – `src.nba.showdown_optimizer_main`
+
+Generate optimized NBA Showdown lineups from a Sabersim CSV.
+
+- **Example:**
+
+```bash
+python -m src.nba.showdown_optimizer_main \
+  --sabersim-glob "data/nba/sabersim/NBA_*.csv" \
+  --num-lineups 50 \
+  --salary-cap 50000 \
+  --stack-mode multi \
+  --stack-weights "5|1=0.4,4|2=0.3,3|3=0.2,2|4=0.1"
+```
+
+- **Flags:**
+  - **`--sabersim-glob`**: Glob/path to NBA Sabersim Showdown CSV.
+    - Must resolve to **exactly one** file.
+    - Default: `config.SABERSIM_CSV`.
+  - **`--num-lineups`**: Number of lineups to generate.
+    - Default: `20`.
+  - **`--salary-cap`**: DraftKings Showdown salary cap.
+    - Default: `50000`.
+  - **`--chunk-size`**: Lineups solved per MILP chunk.
+    - Default: `50`; set `<= 0` to disable chunking.
+  - **`--stack-mode`**: Team stacking mode.
+    - Choices: `"none"` (default), `"multi"`.
+  - **`--stack-weights`**: Optional weights for multi-stack mode.
+    - Same semantics as NFL optimizer.
+
+- **Output:**
+  - Writes an Excel workbook under `outputs/nba/lineups/lineups_<timestamp>.xlsx`.
+
+### NBA top 1% finish rate – `src.nba.top1pct_finish_rate_nba`
+
+Estimate top 1% finish probabilities for NBA Showdown lineups.
+
+- **Example:**
+
+```bash
+python -m src.nba.top1pct_finish_rate_nba \
+  --field-size 23529 \
+  --num-sims 100000
+```
+
+- **Flags:**
+  - **`--field-size`** (required): Total number of lineups in the contest field.
+  - **`--lineups-excel`**: Lineups workbook under `outputs/nba/lineups/`.
+    - Default: most recent `.xlsx` there.
+  - **`--corr-excel`**: Correlations workbook under `outputs/nba/correlations/`.
+    - Default: most recent `.xlsx` there.
+  - **`--num-sims`**: Number of Monte Carlo simulations.
+    - Default: `100000`.
+  - **`--field-var-shrink`**: Shrinkage factor for field variance.
+    - Default: `0.7`.
+  - **`--field-z`**: Z-score for upper tail of field score distribution.
+    - Default: `2.0`.
+  - **`--flex-var-factor`**: Effective variance factor for aggregate non‑CPT
+    component.
+    - Default: `3.5`.
+  - **`--random-seed`**: Optional random seed.
+    - Default: `None` (falls back to `config.SIM_RANDOM_SEED`).
+
+- **Output:**
+  - Writes a top1% workbook under `outputs/nba/top1pct/`.
+
+### NBA lineup diversification – `src.nba.diversify_lineups_nba`
+
+Select a diversified subset of NBA Showdown lineups based on top1% and overlap.
+
+- **Example:**
+
+```bash
+python -m src.nba.diversify_lineups_nba \
+  --num-lineups 150 \
+  --min-top1-pct 1.0 \
+  --max-overlap 4
+```
+
+- **Flags:**
+  - **`--num-lineups`** (required): Number of lineups to select.
+  - **`--min-top1-pct`**: Minimum `top1_pct_finish_rate` in percent.
+    - Default: `1.0`.
+  - **`--max-overlap`**: Maximum overlapping players allowed (0–6).
+    - Default: `4`.
+  - **`--top1pct-excel`**: NBA top1% workbook under `outputs/nba/top1pct/`.
+    - Default: most recent `.xlsx` in that directory.
+
+- **Output:**
+  - Writes a diversified lineups workbook under `outputs/nba/top1pct/`.
+
+### NBA flashback simulation – `src.nba.flashback_sim_nba`
+
+Run a flashback contest simulation for a completed NBA Showdown slate.
+
+- **Example:**
+
+```bash
+python -m src.nba.flashback_sim_nba \
+  --contest-csv data/nba/contests/contest_<id>.csv \
+  --sabersim-csv data/nba/sabersim/NBA_<slate>.csv \
+  --payouts-csv data/nba/payouts/payouts_<id>.json \
+  --num-sims 100000
+```
+
+- **Flags:**
+  - **`--contest-csv`**: Contest standings CSV under `data/nba/contests/`.
+    - Default: most recent `.csv` in that directory.
+  - **`--sabersim-csv`**: Sabersim projections CSV under `data/nba/sabersim/`.
+    - Default: most recent `.csv` in that directory.
+  - **`--payouts-csv`**: DraftKings payout JSON under `data/nba/payouts/`.
+    - Same semantics as NFL flashback script.
+  - **`--num-sims`**: Number of Monte Carlo simulations.
+    - Default: `100000`.
+  - **`--random-seed`**: Optional random seed.
+    - Default: `None` (falls back to `config.SIM_RANDOM_SEED`).
+
+- **Output:**
+  - Writes flashback outputs under `outputs/nba/flashback/`.
+
+### NBA DKEntries filler – `src.nba.fill_dkentries_nba`
+
+Fill an NBA DKEntries CSV with diversified lineups and write an upload‑ready file
+plus ownership summaries.
+
+- **Example:**
+
+```bash
+python -m src.nba.fill_dkentries_nba \
+  --dkentries-csv data/nba/dkentries/DKEntries_<slate>.csv \
+  --diversified-excel outputs/nba/top1pct/top1pct_YYYYMMDD_HHMMSS.xlsx
+```
+
+- **Flags:**
+  - **`--dkentries-csv`**: Explicit NBA DKEntries CSV path.
+    - Default: latest `DKEntries*.csv` under `data/nba/dkentries/`.
+  - **`--diversified-excel`**: Top1% workbook containing `Lineups_Diversified`.
+    - Default: latest `.xlsx` under `outputs/nba/top1pct/`.
+  - **`--output-csv`**: Explicit output CSV path.
+    - Default: timestamped folder under `outputs/nba/dkentries/`.
+
+- **Output:**
+  - Creates a timestamped directory under `outputs/nba/dkentries/<YYYYMMDD_HHMMSS>/`
+    containing:
+    - `dkentries.csv`
+    - `diversified.csv`
+    - `ownership.csv`
 

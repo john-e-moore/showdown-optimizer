@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 """
-Fill a DraftKings DKEntries CSV with diversified Showdown lineups.
+Fill a DraftKings DKEntries CSV with diversified NFL Showdown lineups.
 
 This script:
-  1. Resolves a DKEntries*.csv template (latest under data/dkentries/ by default).
-  2. Resolves the latest diversified lineups workbook under outputs/top1pct/.
+  1. Resolves a DKEntries*.csv template (latest under data/nfl/dkentries/ by default).
+  2. Resolves the latest diversified lineups workbook under outputs/nfl/top1pct/.
   3. Maps each lineup (CPT + 5 FLEX names) to DraftKings player IDs using the
      Name/ID/Roster Position dictionary embedded in the DKEntries CSV.
   4. Assigns lineups to DK entries in a fee-aware way, spreading player exposure
      across distinct Entry Fee tiers while favoring stronger lineups in
      higher-fee contests.
-  5. Writes a DK-upload-ready CSV under outputs/dkentries/ with lineup slots
+  5. Writes a DK-upload-ready CSV under outputs/nfl/dkentries/ with lineup slots
      formatted as '{player_name} ({player_id})'.
 """
 
@@ -27,13 +27,14 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from ..shared import dkentries_core
 from . import config, dkentries_utils
-from .top1pct_finish_rate import _parse_player_name, _resolve_latest_excel
+from .top1pct_finish_rate import run as run_top1pct  # noqa: F401 (for CLI symmetry)
 
 
 LINEUPS_DIVERSIFIED_SHEET = "Lineups_Diversified"
-ENTRY_ID_COLUMN = "Entry ID"
-ENTRY_FEE_COLUMN = "Entry Fee"
+ENTRY_ID_COLUMN = dkentries_core.ENTRY_ID_COLUMN
+ENTRY_FEE_COLUMN = dkentries_core.ENTRY_FEE_COLUMN
 
 
 @dataclass(frozen=True)
@@ -43,116 +44,35 @@ class LineupRecord:
     strength: float
 
 
-def _find_mapping_columns(df: pd.DataFrame) -> Tuple[str, str, str]:
+def _parse_player_name(cell: str) -> str:
     """
-    Locate the columns corresponding to DK's player dictionary:
-      - Name
-      - ID
-      - Roster Position (CPT / FLEX)
-
-    These appear in the DKEntries CSV rows after the actual entries. We locate
-    them by scanning for cells equal to the header labels.
+    Extract the raw player name from a lineup cell like 'Deebo Samuel (34.5%)'.
     """
-    name_col: Optional[str] = None
-    id_col: Optional[str] = None
-    roster_pos_col: Optional[str] = None
-
-    # Use position-based indexing + NumPy to avoid pandas' ambiguous truth-value
-    # behaviour when dealing with duplicate column names or non-standard dtypes.
-    for j, col in enumerate(df.columns):
-        series = df.iloc[:, j].astype(str)
-        values = series.to_numpy()
-
-        if name_col is None and (values == "Name").any():
-            name_col = col
-        if id_col is None and (values == "ID").any():
-            id_col = col
-        if roster_pos_col is None and (values == "Roster Position").any():
-            roster_pos_col = col
-
-    missing = [lbl for lbl, col in [("Name", name_col), ("ID", id_col), ("Roster Position", roster_pos_col)] if col is None]
-    if missing:
-        raise KeyError(
-            "Failed to locate DK player dictionary columns in DKEntries CSV; "
-            f"could not find headers {missing} in any column."
-        )
-
-    return name_col, id_col, roster_pos_col
+    if not isinstance(cell, str):
+        return str(cell)
+    # Split at the first ' (' if present.
+    split_idx = cell.find(" (")
+    if split_idx == -1:
+        return cell.strip()
+    return cell[:split_idx].strip()
 
 
-def _build_name_role_to_id_map(df: pd.DataFrame) -> Dict[Tuple[str, str], str]:
+def _resolve_latest_excel(directory: Path, explicit: str | None) -> Path:
     """
-    Build a mapping (player_name, roster_role) -> dk_player_id using the
-    embedded player dictionary in the DKEntries CSV.
+    Resolve an Excel file path, preferring an explicit argument when provided.
 
-    roster_role is one of {"CPT", "FLEX"}.
+    If explicit is None, pick the most recent *.xlsx file in `directory`.
     """
-    name_col, id_col, roster_pos_col = _find_mapping_columns(df)
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise FileNotFoundError(f"Specified Excel file does not exist: {path}")
+        return path
 
-    mask = df[roster_pos_col].isin(["CPT", "FLEX"])
-    if not mask.any():
-        raise ValueError(
-            "DKEntries CSV appears to be missing CPT/FLEX player dictionary rows."
-        )
-
-    mapping: Dict[Tuple[str, str], str] = {}
-    for _, row in df[mask].iterrows():
-        raw_name = row[name_col]
-        raw_id = row[id_col]
-        roster_role = row[roster_pos_col]
-
-        if pd.isna(raw_name) or pd.isna(raw_id) or pd.isna(roster_role):
-            continue
-
-        name = str(raw_name).strip()
-        role = str(roster_role).strip().upper()
-        player_id = str(raw_id).strip()
-
-        if not name or not player_id or role not in {"CPT", "FLEX"}:
-            continue
-
-        key = (name, role)
-        if key in mapping and mapping[key] != player_id:
-            # In the unlikely event of conflicting IDs, keep the first and warn.
-            print(
-                f"Warning: multiple IDs found for ({name!r}, {role}); "
-                f"keeping {mapping[key]!r}, ignoring {player_id!r}."
-            )
-            continue
-        mapping[key] = player_id
-
-    if not mapping:
-        raise ValueError(
-            "Failed to build any (Name, Roster Position) -> ID mappings from "
-            "DKEntries CSV."
-        )
-
-    return mapping
-
-
-def _get_lineup_slot_columns(df: pd.DataFrame) -> List[int]:
-    """
-    Identify the 6 contiguous columns corresponding to CPT + 5 FLEX slots.
-
-    We locate the first 'CPT' column and then take its positional index plus the
-    next 5 indices. Returning positional indices (rather than column labels)
-    avoids pandas' ambiguous behaviour when there are duplicate column names
-    such as multiple 'FLEX' columns in the DKEntries template.
-    """
-    cols = list(df.columns)
-    try:
-        idx_cpt = cols.index("CPT")
-    except ValueError as exc:
-        raise KeyError("DKEntries CSV is missing required 'CPT' column.") from exc
-
-    if idx_cpt + 5 >= len(cols):
-        raise ValueError(
-            "DKEntries CSV does not appear to contain 6 lineup slot columns "
-            "(CPT + 5 FLEX)."
-        )
-
-    # Return integer column indices for CPT followed by 5 FLEX slots.
-    return list(range(idx_cpt, idx_cpt + 6))
+    candidates = sorted(directory.glob("*.xlsx"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        raise FileNotFoundError(f"No .xlsx files found in directory: {directory}")
+    return candidates[-1]
 
 
 def _load_diversified_lineups(
@@ -194,7 +114,11 @@ def _load_diversified_lineups(
             names.append(_parse_player_name(row[f"flex{j}"]))
 
         base_strength = float(row["top1_pct_finish_rate"]) if has_top1 else 0.0
-        proj_component = float(row["lineup_projection"]) if has_proj and pd.notna(row["lineup_projection"]) else 0.0
+        proj_component = (
+            float(row["lineup_projection"])
+            if has_proj and pd.notna(row["lineup_projection"])
+            else 0.0
+        )
         strength = base_strength + 0.001 * proj_component
 
         records.append(
@@ -491,7 +415,9 @@ def _assign_lineups_fee_aware(
             .astype(float)
         )
 
-    fee_by_row: Dict[int, float] = {int(idx): float(fee_values.loc[idx]) for idx in entry_indices}
+    fee_by_row: Dict[int, float] = {
+        int(idx): float(fee_values.loc[idx]) for idx in entry_indices
+    }
     unique_fees = sorted({v for v in fee_by_row.values()})
     num_tiers = max(1, len(unique_fees))
 
@@ -595,15 +521,15 @@ def run(
     output_csv: Optional[str] = None,
 ) -> Path:
     """
-    Execute DKEntries filling with diversified lineups.
+    Execute DKEntries filling with diversified NFL Showdown lineups.
 
     Args:
         dkentries_csv: Optional explicit DKEntries CSV path. If None, the latest
-            DKEntries*.csv under data/dkentries/ is used.
+            DKEntries*.csv under data/nfl/dkentries/ is used.
         diversified_excel: Optional explicit path to a top1pct workbook. If
-            None, the latest .xlsx under outputs/top1pct/ is used.
+            None, the latest .xlsx under outputs/nfl/top1pct/ is used.
         output_csv: Optional explicit output path. If None, a timestamped file
-            under outputs/dkentries/ is created.
+            under outputs/nfl/dkentries/ is created.
     """
     dkentries_path = dkentries_utils.resolve_latest_dkentries_csv(dkentries_csv)
     print(f"Using DKEntries template: {dkentries_path}")
@@ -634,8 +560,8 @@ def run(
         rows_padded.append(padded)
 
     dk_df = pd.DataFrame(rows_padded, columns=columns)
-    slot_cols = _get_lineup_slot_columns(dk_df)
-    name_role_to_id = _build_name_role_to_id_map(dk_df)
+    slot_cols = dkentries_core.get_lineup_slot_columns(dk_df)
+    name_role_to_id = dkentries_core.build_name_role_to_id_map(dk_df, flex_role_label="FLEX")
 
     assignment = _assign_lineups_fee_aware(dk_df, records)
     filled_df = _apply_assignments_to_dkentries(
@@ -696,7 +622,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help=(
             "Optional explicit path to a DKEntries CSV. If omitted, the latest "
-            "DKEntries*.csv under data/dkentries/ is used."
+            "DKEntries*.csv under data/nfl/dkentries/ is used."
         ),
     )
     parser.add_argument(
@@ -706,7 +632,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help=(
             "Optional explicit path to a top1pct workbook containing "
             f"'{LINEUPS_DIVERSIFIED_SHEET}' sheet. If omitted, the latest "
-            ".xlsx under outputs/top1pct/ is used."
+            ".xlsx under outputs/nfl/top1pct/ is used."
         ),
     )
     parser.add_argument(
@@ -715,7 +641,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help=(
             "Optional explicit output CSV path. If omitted, a timestamped file "
-            "is written under outputs/dkentries/."
+            "is written under outputs/nfl/dkentries/."
         ),
     )
     return parser.parse_args(argv)
@@ -732,5 +658,6 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

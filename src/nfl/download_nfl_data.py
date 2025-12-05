@@ -2,19 +2,19 @@ from __future__ import annotations
 
 """
 Download historical NFL data using nfl_data_py and write Parquet files
-compatible with the correlation pipeline.
+compatible with the NFL correlation pipeline.
 
 This script:
   - Downloads weekly player-game stats for regular seasons (2005+).
   - Downloads games/schedule data for the same seasons.
   - Normalizes key columns to align with the canonical schema defined in
-    src.config and expected by src.data_loading.
+    src.nfl.config and expected by src.nfl.data_loading.
   - Writes Parquet files to config.NFL_PLAYER_GAMES_PARQUET and
     config.NFL_GAMES_PARQUET.
 
 Usage (from project root):
 
-    python -m src.download_nfl_data --start-season 2005 --end-season 2024
+    python -m src.nfl.download_nfl_data --start-season 2005 --end-season 2024
 """
 
 import argparse
@@ -80,8 +80,7 @@ def download_games(seasons: List[int]) -> pd.DataFrame:
         # If no explicit season-type column is present, assume regular season
         games[config.COL_SEASON_TYPE] = "REG"
 
-    # Align column names exactly with config expectations (already matching
-    # in most nfl_data_py versions, but kept explicit for clarity).
+    # Align column names exactly with config expectations.
     rename_map = {
         "game_id": config.COL_GAME_ID,
         "season": config.COL_SEASON,
@@ -214,9 +213,15 @@ def main() -> None:
 
     if not args.overwrite:
         if player_path.exists():
-            print(f"Player stats file already exists at {player_path} (use --overwrite to replace).")
+            print(
+                f"Player stats file already exists at {player_path} "
+                "(use --overwrite to replace)."
+            )
         if games_path.exists():
-            print(f"Games file already exists at {games_path} (use --overwrite to replace).")
+            print(
+                f"Games file already exists at {games_path} "
+                "(use --overwrite to replace)."
+            )
         if player_path.exists() and games_path.exists():
             return
 
@@ -235,5 +240,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

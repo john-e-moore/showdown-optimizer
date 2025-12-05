@@ -10,10 +10,10 @@
 #   ./run_full.sh PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]
 #
 # Examples:
-#   ./run_full.sh data/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv
-#   ./run_full.sh data/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv 23529 150 50000
-#   ./run_full.sh data/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv 23529 1000 50000 multi
-#   ./run_full.sh data/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv 23529 1000 50000 multi "5|1=0.4,4|2=0.3,3|3=0.2,2|4=0.1,1|5=0.0"
+#   ./run_full.sh data/nfl/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv
+#   ./run_full.sh data/nfl/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv 23529 150 50000
+#   ./run_full.sh data/nfl/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv 23529 1000 50000 multi
+#   ./run_full.sh data/nfl/sabersim/NFL_2025-11-27-820pm_DK_SHOWDOWN_TB-@-DAL.csv 23529 1000 50000 multi "5|1=0.4,4|2=0.3,3|3=0.2,2|4=0.1,1|5=0.0"
 #
 # Notes:
 #   - FIELD_SIZE defaults to 23529 if not provided.
@@ -42,20 +42,20 @@ fi
 
 SABERSIM_CSV="$1"
 FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-1000}"
+NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
 
 # If a 7th argument is provided, treat it as an explicit override for the
 # number of diversified lineups to select. Otherwise, default to the number
-# of actual entries in the latest DKEntries*.csv under data/dkentries/.
+# of actual entries in the latest DKEntries*.csv under data/nfl/dkentries/.
 DIVERSIFIED_NUM_CLI="${7-}"
 if [[ -n "${DIVERSIFIED_NUM_CLI}" ]]; then
   DIVERSIFIED_NUM="${DIVERSIFIED_NUM_CLI}"
 else
   echo "Resolving diversified lineup count from latest DKEntries CSV..."
-  DIVERSIFIED_NUM="$(python -m src.dkentries_utils --count-entries)"
+  DIVERSIFIED_NUM="$(python -m src.nfl.dkentries_utils --count-entries)"
 fi
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
@@ -64,14 +64,14 @@ if [[ ! -f "${SABERSIM_CSV}" ]]; then
 fi
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
-CORR_EXCEL="outputs/correlations/showdown_corr_matrix_${timestamp}.xlsx"
+CORR_EXCEL="outputs/nfl/correlations/showdown_corr_matrix_${timestamp}.xlsx"
 
 echo "================================================================"
 echo "Step 1/4: Building correlation matrix from '${SABERSIM_CSV}'"
 echo "         -> Output: ${CORR_EXCEL}"
 echo "================================================================"
 
-python -m src.main \
+python -m src.nfl.main \
   --sabersim-csv "${SABERSIM_CSV}" \
   --output-excel "${CORR_EXCEL}"
 
@@ -98,7 +98,7 @@ if [[ -n "${STACK_WEIGHTS}" ]]; then
   OPT_STACK_WEIGHTS=(--stack-weights "${STACK_WEIGHTS}")
 fi
 
-python -m src.showdown_optimizer_main \
+python -m src.nfl.showdown_optimizer_main \
   --sabersim-glob "${SABERSIM_CSV}" \
   --num-lineups "${NUM_LINEUPS}" \
   --salary-cap "${SALARY_CAP}" \
@@ -112,7 +112,7 @@ echo "         Field size: ${FIELD_SIZE}"
 echo "         Using latest lineups & correlations workbooks."
 echo "================================================================"
 
-python -m src.top1pct_finish_rate \
+python -m src.nfl.top1pct_finish_rate \
   --field-size "${FIELD_SIZE}"
 
 echo
@@ -120,32 +120,29 @@ echo "================================================================"
 echo "Step 4/4: Selecting diversified lineups"
 echo "         Target diversified lineups: ${DIVERSIFIED_NUM}"
 echo "         Min top1% finish rate: 1.0%"
-echo "         Max player overlap: 4"
+echo "         Max player overlap: 5"
 echo "================================================================"
 
-python -m src.diversify_lineups \
+python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
   --min-top1-pct 1.0 \
-  --max-overlap 4
+  --max-overlap 5
 
 echo
-<<<<<<< HEAD
-=======
 echo "================================================================"
 echo "Step 5: Filling DKEntries CSV with diversified lineups"
-echo "         Using latest DKEntries template under data/dkentries/"
-echo "         Writing DK-upload-ready CSV under outputs/dkentries/"
+echo "         Using latest DKEntries template under data/nfl/dkentries/"
+echo "         Writing DK-upload-ready CSV under outputs/nfl/dkentries/"
 echo "================================================================"
 
-OUTPUT_DKENTRIES_DIR="outputs/dkentries"
+OUTPUT_DKENTRIES_DIR="outputs/nfl/dkentries"
 mkdir -p "${OUTPUT_DKENTRIES_DIR}"
 OUTPUT_DKENTRIES_CSV="${OUTPUT_DKENTRIES_DIR}/DKEntries_${timestamp}.csv"
 
-python -m src.fill_dkentries \
+python -m src.nfl.fill_dkentries \
   --output-csv "${OUTPUT_DKENTRIES_CSV}"
 
 echo
->>>>>>> 5e38b003dccc43da38d50c19f258658625fd57d2
 echo "All steps completed."
 
 

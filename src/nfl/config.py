@@ -10,20 +10,28 @@ overridden as needed by editing this module.
 from pathlib import Path
 from typing import Final, Dict, List
 
+from ..shared import config_base
+
 
 # -----------------------------------------------------------------------------
 # Base paths
 # -----------------------------------------------------------------------------
 
-PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
-DATA_DIR: Final[Path] = PROJECT_ROOT / "data"
+PROJECT_ROOT: Final[Path] = config_base.PROJECT_ROOT
+
+# Treat this module as the NFL-specific configuration. Data and outputs are
+# routed through sport-aware subdirectories:
+#   - data/nfl/...
+#   - outputs/nfl/...
+DATA_DIR: Final[Path] = config_base.get_data_dir_for_sport("nfl")
 NFL_RAW_DIR: Final[Path] = DATA_DIR / "nfl_raw"
 NFL_PROCESSED_DIR: Final[Path] = DATA_DIR / "nfl_processed"
 SABERSIM_DIR: Final[Path] = DATA_DIR / "sabersim"
-MODELS_DIR: Final[Path] = PROJECT_ROOT / "models"
-OUTPUTS_DIR: Final[Path] = PROJECT_ROOT / "outputs"
+
+MODELS_DIR: Final[Path] = config_base.MODELS_ROOT
+OUTPUTS_DIR: Final[Path] = config_base.get_outputs_dir_for_sport("nfl")
 CORR_OUTPUTS_DIR: Final[Path] = OUTPUTS_DIR / "correlations"
-DIAGNOSTICS_DIR: Final[Path] = PROJECT_ROOT / "diagnostics"
+DIAGNOSTICS_DIR: Final[Path] = config_base.get_diagnostics_dir_for_sport("nfl")
 
 
 # -----------------------------------------------------------------------------
@@ -172,5 +180,6 @@ def ensure_directories() -> None:
 
     CORR_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 

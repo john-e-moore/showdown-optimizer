@@ -1,39 +1,57 @@
 from __future__ import annotations
 
 """
-Post-process Showdown lineups with top 1% finish rates to select a diversified
-subset of X lineups.
+Sport-agnostic core for diversifying DraftKings Showdown top1pct lineups.
 
-This module:
-  1. Loads the latest top1pct workbook from outputs/top1pct/*.xlsx (or a
-     user-specified workbook path).
-  2. Filters to lineups with top1_pct_finish_rate >= min_top1_pct.
-  3. Represents each lineup as a set of player names (CPT + 5 FLEX).
-  4. Greedily selects up to num_lineups lineups, preferring higher
-     top1_pct_finish_rate while enforcing a maximum player-overlap constraint.
-  5. Writes the selected lineups to a new Excel workbook under outputs/top1pct/.
+This module operates on the standard top1pct Excel schema and writes
+diversified lineups back under a caller-provided outputs directory.
 """
 
-import argparse
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, FrozenSet, List
-import pandas as pd
+from typing import Dict, FrozenSet, List, Tuple
 
-from . import config
-from .top1pct_finish_rate import _parse_player_name, _resolve_latest_excel
+import pandas as pd
 
 
 LINEUPS_TOP1PCT_SHEET_NAME = "Lineups_Top1Pct"
 
 
+def _resolve_latest_excel(directory: Path, explicit: str | None) -> Path:
+    """
+    Resolve an Excel file path, preferring an explicit argument when provided.
+    """
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise FileNotFoundError(f"Specified Excel file does not exist: {path}")
+        return path
+
+    candidates = sorted(directory.glob("*.xlsx"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        raise FileNotFoundError(f"No .xlsx files found in directory: {directory}")
+    return candidates[-1]
+
+
+def _parse_player_name(cell: str) -> str:
+    """
+    Extract player name from a cell like 'Deebo Samuel (34.5%)'.
+    """
+    if not isinstance(cell, str):
+        return str(cell)
+    split_idx = cell.find(" (")
+    if split_idx == -1:
+        return cell.strip()
+    return cell[:split_idx].strip()
+
+
 def _load_top1pct_lineups(
+    outputs_dir: Path,
     top1pct_excel: str | None,
 ) -> tuple[Path, pd.DataFrame]:
     """
     Load the Lineups_Top1Pct sheet from the latest or specified top1pct workbook.
     """
-    top1pct_dir = config.OUTPUTS_DIR / "top1pct"
+    top1pct_dir = outputs_dir / "top1pct"
     workbook_path = _resolve_latest_excel(top1pct_dir, top1pct_excel)
 
     xls = pd.ExcelFile(workbook_path)
@@ -50,7 +68,7 @@ def _load_top1pct_lineups(
 
 def _build_player_set(row: pd.Series) -> FrozenSet[str]:
     """
-    Build a frozenset of player names for a lineup row (CPT + 5 FLEX).
+    Build a frozenset of player names for a lineup row (CPT + 5 flex-style slots).
     """
     cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
     names: List[str] = []
@@ -130,11 +148,12 @@ def _greedy_diversified_selection(
 
 def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute CPT / FLEX / total exposure across the diversified lineups.
+    Compute CPT / flex-style / total exposure across the diversified lineups.
 
     Exposure is reported as a percentage of selected lineups:
       - cpt_exposure: 100 * (# of lineups where player is CPT) / N
-      - flex_exposure: 100 * (# of lineups where player appears in any FLEX) / N
+      - flex_exposure: 100 * (# of lineups where player appears in any non-CPT
+        flex-style slot) / N
       - total_exposure: cpt_exposure + flex_exposure
     """
     if selected_df.empty:
@@ -151,6 +170,8 @@ def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     n_lineups = len(selected_df)
+    from collections import defaultdict
+
     cpt_counts: Dict[str, int] = defaultdict(int)
     flex_counts: Dict[str, int] = defaultdict(int)
 
@@ -159,7 +180,7 @@ def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
         cpt_name = _parse_player_name(row["cpt"])
         cpt_counts[cpt_name] += 1
 
-        # FLEX slots
+        # Flex-style slots
         for col in [f"flex{j}" for j in range(1, 6)]:
             flex_name = _parse_player_name(row[col])
             flex_counts[flex_name] += 1
@@ -186,28 +207,29 @@ def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
     return exposure_df
 
 
-def run(
+def run_diversify(
     num_lineups: int,
+    outputs_dir: Path,
     *,
     min_top1_pct: float = 1.0,
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
 ) -> Path:
     """
-    Execute diversification over top1pct lineups.
+    Execute diversification over top1pct lineups for a given sport.
 
     Args:
         num_lineups: Number of lineups (X) to select.
+        outputs_dir: Root outputs directory for the sport
+                     (e.g. outputs/nfl or outputs/nba).
         min_top1_pct: Minimum top1_pct_finish_rate (in percent) to keep.
-        max_overlap: Maximum number of overlapping players allowed between any
-            pair of selected lineups (0–6 for Showdown).
-        top1pct_excel: Optional explicit path to a top1pct workbook. If None,
-            the latest .xlsx file in outputs/top1pct/ is used.
+        max_overlap: Maximum overlap allowed between any pair of lineups.
+        top1pct_excel: Optional explicit path to a top1pct workbook.
 
     Returns:
         Path to the written diversified lineups Excel workbook.
     """
-    workbook_path, lineups_df = _load_top1pct_lineups(top1pct_excel)
+    workbook_path, lineups_df = _load_top1pct_lineups(outputs_dir, top1pct_excel)
 
     print(f"Using top1pct workbook: {workbook_path}")
     print(
@@ -226,12 +248,12 @@ def run(
 
     exposure_df = _compute_exposure(selected_df)
 
-    outputs_dir = config.OUTPUTS_DIR / "top1pct"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
+    top1pct_dir = outputs_dir / "top1pct"
+    top1pct_dir.mkdir(parents=True, exist_ok=True)
 
     # Include num_lineups in the filename; timestamp is already part of the
     # underlying top1pct workbook used for selection.
-    output_path = outputs_dir / f"top1pct_diversified_{num_lineups}.xlsx"
+    output_path = top1pct_dir / f"top1pct_diversified_{num_lineups}.xlsx"
 
     print(f"Writing {len(selected_df)} diversified lineups to {output_path}...")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
@@ -250,60 +272,6 @@ def run(
     return output_path
 
 
-def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Select a diversified subset of NFL Showdown lineups based on "
-            "top 1% finish rate and player-overlap constraints."
-        )
-    )
-    parser.add_argument(
-        "--num-lineups",
-        type=int,
-        required=True,
-        help="Number of lineups (X) to select.",
-    )
-    parser.add_argument(
-        "--min-top1-pct",
-        type=float,
-        default=1.0,
-        help=(
-            "Minimum top1_pct_finish_rate (in percent) required to keep a "
-            "lineup (default: 1.0)."
-        ),
-    )
-    parser.add_argument(
-        "--max-overlap",
-        type=int,
-        default=4,
-        help=(
-            "Maximum number of overlapping players allowed between any pair of "
-            "selected lineups (0–6 for Showdown; default: 4)."
-        ),
-    )
-    parser.add_argument(
-        "--top1pct-excel",
-        type=str,
-        default=None,
-        help=(
-            "Optional path to a top1pct workbook under outputs/top1pct/. "
-            "If omitted, the most recent .xlsx file in that directory is used."
-        ),
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: List[str] | None = None) -> None:
-    args = _parse_args(argv)
-    run(
-        num_lineups=args.num_lineups,
-        min_top1_pct=args.min_top1_pct,
-        max_overlap=args.max_overlap,
-        top1pct_excel=args.top1pct_excel,
-    )
-
-
-if __name__ == "__main__":
-    main()
+__all__ = ["run_diversify"]
 
 

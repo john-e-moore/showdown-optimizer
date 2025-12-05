@@ -4,28 +4,31 @@ from __future__ import annotations
 CLI entry point for the NFL Showdown lineup optimizer.
 
 Example:
-    python -m src.showdown_optimizer_main \
-      --sabersim-glob "data/sabersim/NFL_*.csv" \
+    python -m src.nfl.showdown_optimizer_main \
+      --sabersim-glob "data/nfl/sabersim/NFL_*.csv" \
       --num-lineups 50 \
       --salary-cap 50000
 """
 
 import argparse
 from collections import Counter, defaultdict
-from datetime import datetime
 from glob import glob
 from pathlib import Path
 import time
 
+from datetime import datetime
 import pandas as pd
 
-from . import config
-from .showdown_constraints import build_custom_constraints, build_team_stack_constraint
-from .lineup_optimizer import (
+from ..showdown_constraints import (
+    build_custom_constraints,
+    build_team_stack_constraint,
+)
+from ..shared.lineup_optimizer import (
     Lineup,
     load_players_from_sabersim,
     optimize_showdown_lineups,
 )
+from . import config
 
 
 STACK_PATTERNS: tuple[str, ...] = ("5|1", "4|2", "3|3", "2|4", "1|5")
@@ -168,7 +171,7 @@ def main() -> None:
     parser.add_argument(
         "--sabersim-glob",
         type=str,
-        default=config.SABERSIM_CSV,
+        default=str(config.SABERSIM_DIR / "NFL_*.csv"),
         help=(
             "Glob pattern for Sabersim Showdown projections CSV. "
             "Must resolve to exactly one file."
@@ -237,7 +240,7 @@ def main() -> None:
 
     csv_path = matches[0]
 
-    # Load players for ownership/opponent metadata.
+    # Load players for ownership/opponent metadata and optimization.
     player_pool = load_players_from_sabersim(csv_path)
     players_by_id = {p.player_id: p for p in player_pool.players}
     # All distinct teams present in the slate (used for both stack modes and
@@ -254,7 +257,7 @@ def main() -> None:
 
     if args.stack_mode == "none":
         lineups = optimize_showdown_lineups(
-            projections_path_pattern=csv_path,
+            player_pool=player_pool,
             num_lineups=args.num_lineups,
             salary_cap=args.salary_cap,
             constraint_builders=constraint_builders,
@@ -294,7 +297,7 @@ def main() -> None:
             ]
 
             pattern_lineups = optimize_showdown_lineups(
-                projections_path_pattern=csv_path,
+                player_pool=player_pool,
                 num_lineups=n,
                 salary_cap=args.salary_cap,
                 constraint_builders=pattern_constraint_builders,
@@ -388,7 +391,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Build ownership table from Sabersim \"My Own\" column.
+    # Build ownership table from Sabersim "My Own" column.
     # ------------------------------------------------------------------
     sabersim_df = pd.read_csv(csv_path)
     required_cols = {"Name", "Team", "My Proj", "My Own"}
@@ -514,5 +517,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

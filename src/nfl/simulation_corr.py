@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Monte Carlo simulator for Showdown player correlation.
+Monte Carlo simulator for NFL Showdown player correlation.
 
 Given a Sabersim projections dataframe for a single Showdown slate, this module
 simulates many joint game outcomes consistent with team-level projection
@@ -46,7 +46,7 @@ def _prepare_simulation_players(
       - indices: np.ndarray of player row indices (into players_df)
       - is_qb_mask: np.ndarray[bool] of length n_team_players
       - primary_qb_local_idx: int | None
-      - proj_* arrays and team totals for each stat type
+      - proj_* arrays and team totals for each stat type.
     """
     required_cols = [SABERSIM_NAME_COL, SABERSIM_TEAM_COL, SABERSIM_POS_COL]
     missing = [c for c in required_cols if c not in sabersim_df.columns]
@@ -245,7 +245,6 @@ def _simulate_team_offense(
     proj_rec_yards = team_info["proj_rec_yards"]
     proj_rec_tds = team_info["proj_rec_tds"]
     proj_receptions = team_info["proj_receptions"]
-    is_qb_mask = team_info["is_qb_mask"]
     primary_qb_local_idx = team_info["primary_qb_local_idx"]
 
     n_players = proj_rush_yards.shape[0]
@@ -306,7 +305,7 @@ def _simulate_team_offense(
         team_rush_tds = int(rng.poisson(lam_rush_tds))
         if team_rush_tds > 0:
             p_rush_tds = _dirichlet_shares(
-                rng, proj_rush_tds, config.SIM_DIRICHLET_K_TDS
+                rng, team_info["proj_rush_tds"], config.SIM_DIRICHLET_K_TDS
             )
             if p_rush_tds.sum() > 0:
                 rush_tds = rng.multinomial(team_rush_tds, p_rush_tds).astype(float)
@@ -352,8 +351,7 @@ def _compute_dk_points_from_stats(
     receptions: np.ndarray,
 ) -> np.ndarray:
     """
-    Vectorized DK offensive scoring, mirroring fantasy_scoring.compute_dk_points_offense
-    but without diagnostics or dataframe overhead.
+    Vectorized DK offensive scoring for NFL.
     """
     dk_pass = (
         0.04 * pass_yards
@@ -473,7 +471,7 @@ def simulate_corr_matrix_from_projections(
     try:
         dk_summary.to_csv(csv_path, index=False)
     except Exception:
-        # Best-effort; mirror Parquet snapshot behavior and don't fail the run
+        # Best-effort; mirror snapshot behavior and don't fail the run
         # if CSV writing encounters an unexpected issue.
         pass
 
@@ -521,80 +519,6 @@ def simulate_corr_matrix_from_projections(
     active_names = players_df.loc[has_activity, "player_name"].tolist()
     corr_df = pd.DataFrame(corr, index=active_names, columns=active_names, dtype=float)
     return corr_df
-
-
-def summarize_simulation_vs_projections(
-    sabersim_df: pd.DataFrame,
-    n_sims: int | None = None,
-    random_seed: int | None = None,
-) -> pd.DataFrame:
-    """
-    Run a short simulation and compare simulated DK means to Sabersim projections.
-
-    This is a lightweight diagnostic helper; it returns a dataframe with:
-      - player_name
-      - dk_proj (Sabersim projection)
-      - dk_sim_mean (mean DK from simulations)
-      - dk_sim_std (std DK from simulations)
-    """
-    players_df, _ = _prepare_simulation_players(sabersim_df)
-
-    if n_sims is None:
-        n_sims = max(500, min(config.SIM_N_GAMES, 2000))
-
-    seed = random_seed if random_seed is not None else config.SIM_RANDOM_SEED
-    rng = np.random.default_rng(seed)
-
-    # Reuse main simulator logic but keep per-simulation DK points.
-    _, team_infos = _prepare_simulation_players(sabersim_df)
-    n_players = len(players_df)
-    dk_points = np.zeros((n_players, n_sims), dtype=float)
-    teams: List[str] = list(team_infos.keys())
-
-    for sim_idx in range(n_sims):
-        sim_dk = np.zeros(n_players, dtype=float)
-        for team_name in teams:
-            info = team_infos[team_name]
-            team_stats = _simulate_team_offense(rng, info)
-
-            idx = info["indices"]
-            pass_yards = team_stats[config.COL_PASS_YARDS]
-            pass_tds = team_stats[config.COL_PASS_TDS]
-            rush_yards = team_stats[config.COL_RUSH_YARDS]
-            rush_tds = team_stats[config.COL_RUSH_TDS]
-            rec_yards = team_stats[config.COL_REC_YARDS]
-            rec_tds = team_stats[config.COL_REC_TDS]
-            receptions = team_stats[config.COL_RECEPTIONS]
-
-            interceptions = np.zeros_like(pass_yards, dtype=float)
-
-            dk = _compute_dk_points_from_stats(
-                pass_yards=pass_yards,
-                pass_tds=pass_tds,
-                interceptions=interceptions,
-                rush_yards=rush_yards,
-                rush_tds=rush_tds,
-                rec_yards=rec_yards,
-                rec_tds=rec_tds,
-                receptions=receptions,
-            )
-            sim_dk[idx] = dk
-
-        dk_points[:, sim_idx] = sim_dk
-
-    dk_mean = dk_points.mean(axis=1)
-    dk_std = dk_points.std(axis=1, ddof=0)
-
-    summary = pd.DataFrame(
-        {
-            "player_name": players_df["player_name"].tolist(),
-            "dk_proj": players_df["dk_proj"].to_numpy(dtype=float),
-            "dk_sim_mean": dk_mean,
-            "dk_sim_std": dk_std,
-        }
-    )
-    return summary
-
 
 
 

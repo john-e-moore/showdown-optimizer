@@ -1,36 +1,34 @@
 from __future__ import annotations
 
 """
-MILP-based DraftKings NFL Showdown (Captain Mode) lineup optimizer.
+Shared MILP core for DraftKings Showdown (Captain Mode) lineup optimization.
 
-This module defines:
+This module is intentionally sport-agnostic. It defines:
+
   - Core domain models: Player, PlayerPool, Lineup
-  - CSV loader for Sabersim-style Showdown projections -> PlayerPool
-  - Helpers to build a single-lineup MILP model with PuLP
-  - Constraint hooks for custom DFS rules
-  - Functions to solve for one lineup or the top N lineups
+  - Generic slot layout (CPT + 5 FLEX)
+  - MILP variable layout and helper types
+  - Base roster/eligibility/salary constraints
+  - Hooks for custom DFS constraints via ConstraintBuilder callables
+  - Solvers for single and multi-lineup optimization (with optional chunking)
 
-The optimizer currently maximizes mean projected DK points under standard
-DraftKings Showdown roster rules:
-  - 1 CPT (1.5x salary, 1.5x points)
-  - 5 FLEX (normal salary, normal points)
-  - 6 distinct players
-  - Salary cap (configurable)
+Sport-specific modules (e.g., NFL and NBA) are responsible for:
+
+  - Loading projections from Sabersim-style CSVs into Player/PlayerPool.
+  - Choosing which constraint builders to apply for a given slate.
+  - Writing optimizer outputs to sport-aware directories.
 """
 
 from dataclasses import dataclass
-from glob import glob
-from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import time
 
-import pandas as pd
 import pulp
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Core data structures
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -84,7 +82,9 @@ class Lineup:
 
     def __post_init__(self) -> None:
         if len(self.flex) != 5:
-            raise ValueError(f"Lineup must have exactly 5 FLEX players, got {len(self.flex)}")
+            raise ValueError(
+                f"Lineup must have exactly 5 FLEX players, got {len(self.flex)}"
+            )
         # Enforce 6 distinct players.
         all_ids = [self.cpt.player_id] + [p.player_id for p in self.flex]
         if len(set(all_ids)) != 6:
@@ -113,122 +113,9 @@ class Lineup:
         return (self.cpt.player_id,) + tuple(p.player_id for p in self.flex)
 
 
-# ---------------------------------------------------------------------------
-# Sabersim CSV loading
-# ---------------------------------------------------------------------------
-
-
-SABERSIM_NAME_COL = "Name"
-SABERSIM_TEAM_COL = "Team"
-SABERSIM_POS_COL = "Pos"
-SABERSIM_SALARY_COL = "Salary"
-SABERSIM_DK_PROJ_COL = "My Proj"
-SABERSIM_DK_STD_COL = "dk_std"
-SABERSIM_IS_CPT_ELIGIBLE_COL = "is_cpt_eligible"
-SABERSIM_IS_FLEX_ELIGIBLE_COL = "is_flex_eligible"
-
-
-def _load_raw_sabersim_csv(path: str | Path) -> pd.DataFrame:
-    """
-    Load a Sabersim Showdown CSV and reduce to one FLEX-equivalent row per player.
-
-    Heuristic:
-      - For each (Name, Team) pair, keep the row with the LOWER salary, which
-        corresponds to FLEX in DraftKings Showdown.
-      - Do NOT filter by position; optimizer may want DST, K, etc.
-    """
-    df = pd.read_csv(path)
-
-    required = [SABERSIM_NAME_COL, SABERSIM_TEAM_COL, SABERSIM_SALARY_COL]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(
-            f"Sabersim CSV missing required columns {missing}. "
-            "Please check the file schema."
-        )
-
-    df = (
-        df.sort_values(by=[SABERSIM_NAME_COL, SABERSIM_TEAM_COL, SABERSIM_SALARY_COL])
-        .groupby([SABERSIM_NAME_COL, SABERSIM_TEAM_COL], as_index=False)
-        .first()
-    )
-    return df
-
-
-def load_players_from_sabersim(path: str | Path) -> PlayerPool:
-    """
-    Load Sabersim projections from CSV and build a PlayerPool.
-
-    Expected (or inferred) columns:
-      - Name, Team, Pos, Salary, My Proj
-      - Optional: dk_std, is_cpt_eligible, is_flex_eligible
-
-    Player IDs are synthetic but stable within a single run.
-    """
-    df = _load_raw_sabersim_csv(path)
-
-    if SABERSIM_DK_PROJ_COL not in df.columns:
-        raise KeyError(
-            f"Sabersim CSV missing DK projection column '{SABERSIM_DK_PROJ_COL}'."
-        )
-
-    # Drop players with zero (or negative) projection; they cannot contribute
-    # positively to an optimal lineup and only slow down the solver.
-    df = df[df[SABERSIM_DK_PROJ_COL] > 0]
-
-    # Ensure basic columns exist even if missing in source.
-    if SABERSIM_POS_COL not in df.columns:
-        df[SABERSIM_POS_COL] = ""
-
-    players: List[Player] = []
-    for idx, row in df.iterrows():
-        name = str(row[SABERSIM_NAME_COL])
-        team = str(row[SABERSIM_TEAM_COL])
-        position = str(row[SABERSIM_POS_COL])
-
-        # Synthetic, human-readable ID based on name + team.
-        player_id = f"{name}|{team}"
-
-        dk_salary = int(row[SABERSIM_SALARY_COL])
-        dk_proj = float(row[SABERSIM_DK_PROJ_COL])
-
-        dk_std: Optional[float]
-        if SABERSIM_DK_STD_COL in df.columns:
-            val = row[SABERSIM_DK_STD_COL]
-            dk_std = float(val) if pd.notna(val) else None
-        else:
-            dk_std = None
-
-        if SABERSIM_IS_CPT_ELIGIBLE_COL in df.columns:
-            is_cpt_eligible = bool(row[SABERSIM_IS_CPT_ELIGIBLE_COL])
-        else:
-            is_cpt_eligible = True
-
-        if SABERSIM_IS_FLEX_ELIGIBLE_COL in df.columns:
-            is_flex_eligible = bool(row[SABERSIM_IS_FLEX_ELIGIBLE_COL])
-        else:
-            is_flex_eligible = True
-
-        players.append(
-            Player(
-                player_id=player_id,
-                name=name,
-                team=team,
-                position=position,
-                dk_salary=dk_salary,
-                dk_proj=dk_proj,
-                dk_std=dk_std,
-                is_cpt_eligible=is_cpt_eligible,
-                is_flex_eligible=is_flex_eligible,
-            )
-        )
-
-    return PlayerPool(players)
-
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # MILP model construction
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 SLOTS: Tuple[str, ...] = ("CPT", "F1", "F2", "F3", "F4", "F5")
@@ -385,9 +272,9 @@ def add_base_constraints(
     add_min_one_per_team_constraint(prob, x, player_pool)
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Custom DFS constraint hooks
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 ConstraintBuilder = Callable[[pulp.LpProblem, VarDict, PlayerPool], None]
@@ -437,8 +324,8 @@ def mutually_exclusive_groups(
 
     Example usage:
         mutually_exclusive_groups(
-            lambda p: p.team == \"KC\" and p.position == \"RB\",
-            lambda p: p.team == \"SF\" and p.position == \"DST\",
+            lambda p: p.team == "KC" and p.position == "RB",
+            lambda p: p.team == "SF" and p.position == "DST",
         )
     """
 
@@ -485,9 +372,9 @@ def if_qb_cpt_then_no_dst(team_qb: str, team_dst: str) -> ConstraintBuilder:
     return builder
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Solving helpers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 def _extract_lineup_from_solution(
@@ -595,7 +482,7 @@ def _add_projection_cap_constraint(
 
 
 def optimize_showdown_lineups(
-    projections_path_pattern: str,
+    player_pool: PlayerPool,
     num_lineups: int,
     salary_cap: int = 50_000,
     constraint_builders: Optional[Sequence[ConstraintBuilder]] = None,
@@ -603,29 +490,18 @@ def optimize_showdown_lineups(
     projection_eps: float = 1e-4,
 ) -> List[Lineup]:
     """
-    Generate up to num_lineups optimal lineups from Sabersim projections.
+    Generate up to num_lineups optimal lineups from a PlayerPool.
 
     The function:
-      1) Resolves projections_path_pattern to a single CSV path.
-      2) Builds a PlayerPool.
-      3) Builds a MILP model with base + custom constraints.
-      4) Iteratively solves and extracts lineups, adding a no-duplicate
+      1) Builds a MILP model with base + custom constraints.
+      2) Iteratively solves and extracts lineups, adding a no-duplicate
          constraint after each solution so that at least one player changes.
+
+    When chunk_size is provided and > 0, the solver will:
+      - Solve for up to chunk_size lineups at a time from a fresh model.
+      - Use a projection cap between chunks to explore deeper into the lineup
+        frontier while avoiding re-solving for previously found lineups.
     """
-    matches = sorted(glob(projections_path_pattern))
-    if not matches:
-        raise FileNotFoundError(
-            f"No Sabersim CSVs found matching pattern: {projections_path_pattern!r}"
-        )
-    if len(matches) > 1:
-        raise ValueError(
-            "Expected exactly one Sabersim CSV for optimizer, "
-            f"but found {len(matches)}: {matches}"
-        )
-
-    csv_path = matches[0]
-    player_pool = load_players_from_sabersim(csv_path)
-
     # If chunking is disabled, fall back to legacy behavior: single model with
     # a growing set of no-duplicate constraints.
     if not chunk_size or chunk_size <= 0:
@@ -733,5 +609,35 @@ def optimize_showdown_lineups(
 
     return all_lineups
 
+
+__all__ = [
+    "Player",
+    "PlayerPool",
+    "Lineup",
+    "SLOTS",
+    "CPT_SLOT",
+    "FLEX_SLOTS",
+    "VarKey",
+    "VarDict",
+    "ConstraintBuilder",
+    "build_showdown_model",
+    "add_single_cpt_constraint",
+    "add_flex_count_constraint",
+    "add_unique_player_constraint",
+    "add_salary_cap_constraint",
+    "add_eligibility_constraints",
+    "add_min_one_per_team_constraint",
+    "set_mean_projection_objective",
+    "add_base_constraints",
+    "min_players_from_team",
+    "max_players_from_team",
+    "mutually_exclusive_groups",
+    "if_qb_cpt_then_no_dst",
+    "_extract_lineup_from_solution",
+    "solve_single_lineup",
+    "_build_showdown_model_with_constraints",
+    "_add_projection_cap_constraint",
+    "optimize_showdown_lineups",
+]
 
 

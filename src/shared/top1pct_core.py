@@ -1,38 +1,25 @@
 from __future__ import annotations
 
 """
-Estimate top 1% finish probability for NFL Showdown lineups.
+Sport-agnostic core for estimating top 1% finish probabilities for
+DraftKings Showdown lineups.
 
-This script:
-  1. Loads a lineup workbook from outputs/lineups/*.xlsx.
-  2. Loads a correlation workbook from outputs/correlations/*.xlsx.
-  3. Builds a multivariate normal model of player DK scores using
-     means + std devs + correlation matrix.
-  4. Uses ownership projections to approximate the field score distribution.
-  5. Estimates, for each lineup, the probability of finishing in the
-     top 1% of the modeled field.
+This module intentionally has no dependency on sport-specific config
+modules. Callers must provide:
 
-Usage example:
+  - outputs_dir: root outputs directory for the sport
+                 (e.g. outputs/nfl or outputs/nba).
 
-    python -m src.top1pct_finish_rate --field-size 23529
-
-You can also specify input workbooks explicitly:
-
-    python -m src.top1pct_finish_rate \\
-        --field-size 23529 \\
-        --lineups-excel outputs/lineups/lineups_20251126_204920.xlsx \\
-        --corr-excel outputs/correlations/showdown_corr_matrix.xlsx
+It operates purely on the standard Excel workbook schemas produced by
+the optimizer and correlation pipelines.
 """
 
-import argparse
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-
-from . import config, diagnostics
 
 
 LINEUPS_SHEET_NAME = "Lineups"
@@ -117,7 +104,7 @@ def _load_corr_workbook(
     Load Sabersim projections and correlation matrix from a correlation workbook.
 
     Returns:
-        sabersim_proj_df: FLEX-only Sabersim projections.
+        sabersim_proj_df: flex-style Sabersim projections (non-CPT slots).
         corr_df: square correlation matrix with player names as index/columns.
     """
     xls = pd.ExcelFile(path)
@@ -153,35 +140,6 @@ def _load_corr_workbook(
     return sabersim_proj_df, corr_df
 
 
-def _load_simulation_stddevs() -> Dict[str, float]:
-    """
-    Optionally load per-player DK stdevs from diagnostics, if available.
-
-    Returns:
-        Mapping from player_name -> dk_sim_std.
-    """
-    diagnostics_dir = config.DIAGNOSTICS_DIR / "simulation"
-    csv_path = diagnostics_dir / "dk_sim_vs_proj.csv"
-    if not csv_path.is_file():
-        return {}
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return {}
-
-    if "player_name" not in df.columns or "dk_sim_std" not in df.columns:
-        return {}
-
-    std_by_name = (
-        df[["player_name", "dk_sim_std"]]
-        .dropna(subset=["player_name", "dk_sim_std"])
-        .set_index("player_name")["dk_sim_std"]
-        .to_dict()
-    )
-    return std_by_name
-
-
 def _build_player_universe(
     lineups_df: pd.DataFrame,
     ownership_df: pd.DataFrame,
@@ -197,7 +155,8 @@ def _build_player_universe(
         mu: DK point means (shape P).
         sigma: DK point standard deviations (shape P).
         cpt_own: CPT ownership fractions (shape P).
-        flex_own: FLEX ownership fractions (shape P).
+        flex_own: flex-style ownership fractions (shape P).
+        positions: string position labels (shape P).
     """
     # Players from correlation matrix.
     corr_players = [str(x) for x in corr_df.index.tolist()]
@@ -271,7 +230,7 @@ def _build_player_universe(
         )
     lineups_proj_df["Name"] = lineups_proj_df["Name"].astype(str)
     lineups_proj_df["Team"] = lineups_proj_df["Team"].astype(str)
-    # Keep lowest-salary row per (Name, Team) as FLEX-equivalent.
+    # Keep lowest-salary row per (Name, Team) as flex-style (non-CPT) equivalent.
     lineups_proj_df = (
         lineups_proj_df.sort_values(
             by=["Name", "Team", "Salary"], ascending=[True, True, True]
@@ -294,16 +253,8 @@ def _build_player_universe(
     else:
         pos_lp = pd.Series(index=lp_indexed.index, dtype=str)
 
-    # Combine dk_std from correlation projections, then lineup projections,
-    # and finally simulation-based std devs.
+    # Combine dk_std from correlation projections, then lineup projections.
     dk_std_series = dk_std_corr.combine_first(dk_std_lp)
-
-    # Optionally overlay simulation-based std devs.
-    sim_std_by_name = _load_simulation_stddevs()
-    if sim_std_by_name:
-        sim_std_series = pd.Series(sim_std_by_name)
-        # Only use sim std where we have it; leave others as dk_std / NaN.
-        dk_std_series = dk_std_series.combine_first(sim_std_series)
 
     # Combine positions with preference for correlation projections, then
     # lineup projections.
@@ -395,9 +346,7 @@ def _build_full_correlation(
     base_names = [str(x) for x in corr_df.index.tolist()]
     base_index: Dict[str, int] = {name: i for i, name in enumerate(base_names)}
 
-    n_base = len(base_names)
     n_total = len(universe_names)
-
     corr_full = np.eye(n_total, dtype=float)
     base_corr = corr_df.to_numpy(dtype=float)
 
@@ -475,10 +424,15 @@ def _compute_field_thresholds(
     """
     Compute approximate 99th percentile thresholds of the field score distribution.
 
+    This models the field as a mixture of CPT and flex-style roster slots. The
+    flex component is scaled by ``flex_var_factor`` to calibrate its variance,
+    regardless of whether those slots are labelled FLEX (NFL) or UTIL (NBA)
+    in downstream DraftKings artifacts.
+
     Args:
         X: player DK scores, shape (S, P).
         cpt_own: CPT ownership fractions, shape (P,).
-        flex_own: FLEX ownership fractions, shape (P,).
+        flex_own: flex-style ownership fractions aggregated over non-CPT slots.
 
     Returns:
         thresholds: array of shape (S,) with per-simulation 99th percentile scores.
@@ -494,17 +448,17 @@ def _compute_field_thresholds(
     var_C = mC2 - mu_C**2
     var_C = np.clip(var_C, a_min=0.0, a_max=None)
 
-    # FLEX mixture: per-slot distribution, nominally 5 slots but with an
+    # Flex-style mixture: per-slot distribution, nominally 5 slots but with an
     # optional variance calibration factor to soften the tail.
     pi = flex_own / 5.0
-    flex_scores = X  # DK points at FLEX are just X.
+    flex_scores = X  # DK points at non-CPT flex-style slots are just X.
     mu_F = flex_scores @ pi
     mF2 = (flex_scores ** 2) @ pi
     var_F = mF2 - mu_F**2
     var_F = np.clip(var_F, a_min=0.0, a_max=None)
 
     mu_F_total = 5.0 * mu_F
-    # Calibrated FLEX variance factor k (<= 5.0 ideally).
+    # Calibrated flex-style variance factor k (<= 5.0 ideally).
     var_F_total = flex_var_factor * var_F
 
     mu_field = mu_C + mu_F_total
@@ -529,7 +483,7 @@ def _build_lineup_weights(
 
     Each row corresponds to a lineup:
       - CPT player has weight 1.5.
-      - Each FLEX player has weight 1.0 (weights add if duplicated).
+      - Each flex-style player has weight 1.0 (weights add if duplicated).
     """
     lineup_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
     missing_cols = [c for c in lineup_cols if c not in lineups_df.columns]
@@ -553,7 +507,7 @@ def _build_lineup_weights(
         else:
             W[k, idx] += 1.5
 
-        # FLEX slots
+        # Flex-style slots
         for col in [f"flex{j}" for j in range(1, 6)]:
             flex_name = _parse_player_name(row[col])
             idx = player_index.get(flex_name)
@@ -572,8 +526,10 @@ def _build_lineup_weights(
     return W
 
 
-def run(
+def run_top1pct(
     field_size: int,
+    outputs_dir: Path,
+    *,
     lineups_excel: str | None = None,
     corr_excel: str | None = None,
     num_sims: int = 20_000,
@@ -583,12 +539,24 @@ def run(
     flex_var_factor: float = 3.5,
 ) -> Path:
     """
-    Execute the top 1% finish rate estimation pipeline.
+    Execute the top 1% finish rate estimation pipeline for a given sport.
+
+    Args:
+        field_size: Total number of lineups in the contest field.
+        outputs_dir: Root outputs directory for the sport
+                     (e.g. outputs/nfl or outputs/nba).
+        lineups_excel: Optional explicit path to a lineups workbook.
+        corr_excel: Optional explicit path to a correlation workbook.
+        num_sims: Number of Monte Carlo simulations.
+        random_seed: Optional RNG seed; if None, use nondeterministic seed.
+        field_var_shrink: Variance shrinkage factor for the modeled field.
+        field_z_score: Z-score for the upper tail of the field distribution.
+        flex_var_factor: Effective variance factor for the aggregate flex-style
+            component.
 
     Returns:
         Path to the written output Excel workbook.
     """
-    outputs_dir = config.OUTPUTS_DIR
     lineups_dir = outputs_dir / "lineups"
     corr_dir = outputs_dir / "correlations"
 
@@ -617,9 +585,7 @@ def run(
     )
 
     corr_full = _build_full_correlation(player_names, corr_df)
-    rng = np.random.default_rng(
-        random_seed if random_seed is not None else config.SIM_RANDOM_SEED
-    )
+    rng = np.random.default_rng(random_seed)
 
     print(
         f"Simulating correlated DK scores for {len(player_names)} players across "
@@ -647,40 +613,6 @@ def run(
         flex_var_factor=flex_var_factor,
     )
 
-    # ------------------------------------------------------------------
-    # Diagnostics: player universe and sample of correlated player scores.
-    # ------------------------------------------------------------------
-    player_universe_df = pd.DataFrame(
-        {
-            "player_name": player_names,
-            "mu": mu,
-            "sigma": sigma,
-            "position": positions,
-            "cpt_own": cpt_own,
-            "flex_own": flex_own,
-            "total_own": cpt_own + flex_own,
-        }
-    )
-    diagnostics.write_df_snapshot(
-        player_universe_df,
-        name="player_universe",
-        step="top1pct",
-        max_rows=1000,
-    )
-
-    # Sample of correlated player scores across the first up-to-100 simulations.
-    n_debug_sims_players = int(min(100, X.shape[0]))
-    debug_player_cols: Dict[str, object] = {"player_name": player_names}
-    for j in range(n_debug_sims_players):
-        debug_player_cols[f"sim_{j}"] = X[j, :]
-    player_scores_df = pd.DataFrame(debug_player_cols)
-    diagnostics.write_df_snapshot(
-        player_scores_df,
-        name="player_scores",
-        step="top1pct",
-        max_rows=1000,
-    )
-
     player_index = {name: i for i, name in enumerate(player_names)}
     print("Scoring lineups across simulations...")
     W = _build_lineup_weights(lineups_df=lineups_df, player_index=player_index)
@@ -693,21 +625,6 @@ def run(
     indicators = scores >= thresholds[:, None]
     p_top1 = indicators.mean(axis=0)
 
-    # Diagnostics: lineup scores and summary statistics.
-    n_debug_sims_lineups = int(min(100, scores.shape[0]))
-    n_debug_lineups = int(min(50, scores.shape[1]))
-    scores_sample = scores[:n_debug_sims_lineups, :n_debug_lineups]
-    lineup_cols = [f"lineup_{i+1}" for i in range(n_debug_lineups)]
-    lineup_scores_df = pd.DataFrame(scores_sample, columns=lineup_cols)
-    lineup_scores_df.insert(0, "sim_idx", np.arange(n_debug_sims_lineups))
-    lineup_scores_df["field_threshold"] = thresholds[:n_debug_sims_lineups]
-    diagnostics.write_df_snapshot(
-        lineup_scores_df,
-        name="lineup_scores",
-        step="top1pct",
-        max_rows=1000,
-    )
-
     # Per-lineup mean/std plus top 1% rate.
     mean_scores = scores.mean(axis=0)
     std_scores = scores.std(axis=0, ddof=0)
@@ -718,12 +635,6 @@ def run(
             "std_score": std_scores,
             "top1_pct_finish_rate": 100.0 * p_top1,
         }
-    )
-    diagnostics.write_df_snapshot(
-        lineup_summary_df,
-        name="lineup_top1_summary",
-        step="top1pct",
-        max_rows=1000,
     )
 
     # Augment lineups DataFrame with top 1% probabilities.
@@ -760,97 +671,8 @@ def run(
     return output_path
 
 
-def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Estimate top 1% finish probabilities for NFL Showdown lineups "
-            "using correlated player outcomes and ownership."
-        )
-    )
-    parser.add_argument(
-        "--field-size",
-        type=int,
-        required=True,
-        help="Total number of lineups in the contest field (e.g., 23529).",
-    )
-    parser.add_argument(
-        "--lineups-excel",
-        type=str,
-        default=None,
-        help=(
-            "Path to lineups Excel workbook under outputs/lineups/. "
-            "If omitted, the most recent .xlsx file in that directory is used."
-        ),
-    )
-    parser.add_argument(
-        "--corr-excel",
-        type=str,
-        default=None,
-        help=(
-            "Path to correlations Excel workbook under outputs/correlations/. "
-            "If omitted, the most recent .xlsx file in that directory is used."
-        ),
-    )
-    parser.add_argument(
-        "--num-sims",
-        type=int,
-        default=100_000,
-        help="Number of Monte Carlo simulations to run (default: 100000).",
-    )
-    parser.add_argument(
-        "--field-var-shrink",
-        type=float,
-        default=0.7,
-        help=(
-            "Multiplicative shrinkage factor for the modeled field variance "
-            "(0 < value <= 1, default: 0.7)."
-        ),
-    )
-    parser.add_argument(
-        "--field-z",
-        type=float,
-        default=2.0,
-        help=(
-            "Z-score used for the upper tail of the field score distribution "
-            "(default: 2.0, slightly below the canonical 99th percentile 2.326)."
-        ),
-    )
-    parser.add_argument(
-        "--flex-var-factor",
-        type=float,
-        default=3.5,
-        help=(
-            "Effective variance factor for the aggregate FLEX component "
-            "(<= 5.0; default: 3.5)."
-        ),
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=None,
-        help=(
-            "Optional random seed for reproducibility. "
-            "Defaults to config.SIM_RANDOM_SEED when omitted."
-        ),
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: List[str] | None = None) -> None:
-    args = _parse_args(argv)
-    run(
-        field_size=args.field_size,
-        lineups_excel=args.lineups_excel,
-        corr_excel=args.corr_excel,
-        num_sims=args.num_sims,
-        random_seed=args.random_seed,
-        field_var_shrink=args.field_var_shrink,
-        field_z_score=args.field_z,
-        flex_var_factor=args.flex_var_factor,
-    )
-
-
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "run_top1pct",
+]
 
 

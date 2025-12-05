@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 """
-Data loading utilities for nflverse-style Parquet inputs.
+Data loading utilities for nflverse-style Parquet inputs (NFL).
 
 This module provides thin wrappers around pandas to:
 - Load player-game statistics
 - Load games/schedule data
 - Apply basic filtering (regular season only, 2005+)
-- Normalize a few key column names using config-level conventions
+- Normalize a few key column names using NFL config-level conventions.
 """
 
 from typing import Iterable
@@ -99,7 +99,7 @@ def load_player_game_stats(path: str) -> pd.DataFrame:
     It also:
       - Renames raw stat columns to canonical names using config.RAW_TO_CANONICAL_STATS
       - Ensures presence of core identifier columns such as game_id, player_id,
-        season, week, team, position (using config column constants)
+        season, week, team, position (using config column constants).
     """
     df = pd.read_parquet(path)
 
@@ -139,7 +139,7 @@ def load_games(path: str) -> pd.DataFrame:
       - Seasons >= 2005
 
     It also ensures presence of key identifiers:
-      - game_id, season, week, home/away teams, and scores
+      - game_id, season, week, home/away teams, and scores.
     """
     df = pd.read_parquet(path)
 
@@ -164,5 +164,6 @@ def load_games(path: str) -> pd.DataFrame:
     diagnostics.write_df_snapshot(df, name="games", step="load")
 
     return df
+
 
 

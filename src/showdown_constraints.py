@@ -14,7 +14,7 @@ from typing import Dict, List, Tuple
 
 import pulp
 
-from .lineup_optimizer import (
+from .shared.optimizer_core import (
     CPT_SLOT,
     SLOTS,
     ConstraintBuilder,
