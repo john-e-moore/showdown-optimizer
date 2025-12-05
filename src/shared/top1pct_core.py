@@ -621,7 +621,7 @@ def run_top1pct(
 
     if field_model not in {"mixture", "explicit"}:
         raise ValueError(
-            f\"Unsupported field_model '{field_model}'. Expected 'mixture' or 'explicit'.\"
+            f"Unsupported field_model '{field_model}'. Expected 'mixture' or 'explicit'."
         )
 
     if field_model == "mixture":
