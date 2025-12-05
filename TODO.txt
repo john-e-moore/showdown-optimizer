@@ -15,3 +15,4 @@ x Post-contest sim; see if my stuff matches Sabersim's
  - Structure: date/{sport}/{slate}/{contest_id}/
  - Contents: draftables, payouts, results
 - Get higher sabersim plan for non-flagship ownership in showdown
+- Add good logging; put both diagnostic output and logs inside logs/{timestamp}/

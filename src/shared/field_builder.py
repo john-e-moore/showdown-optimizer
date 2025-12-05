@@ -27,6 +27,34 @@ import pandas as pd
 LINEUP_COLS = ["cpt"] + [f"flex{i}" for i in range(1, 6)]
 
 
+def _hamilton_rounding(proportions: np.ndarray, total_slots: int) -> np.ndarray:
+    """Hamilton / largest-remainder rounding for integer quotas.
+
+    Given non-negative proportions that (approximately) sum to 1, allocate
+    ``total_slots`` integer slots whose sum is exactly ``total_slots``.
+    """
+
+    if total_slots <= 0 or proportions.size == 0:
+        return np.zeros_like(proportions, dtype=int)
+
+    # Ideal real-valued targets.
+    target = proportions * float(total_slots)
+    base = np.floor(target).astype(int)
+
+    remaining = int(total_slots - int(base.sum()))
+    if remaining < 0:
+        # Numerical-quirk safeguard: never un-assign slots.
+        remaining = 0
+
+    if remaining > 0:
+        remainders = target - base
+        order = np.argsort(-remainders)
+        for idx in order[:remaining]:
+            base[idx] += 1
+
+    return base
+
+
 @dataclass
 class FieldBuilderConfig:
     """Hyperparameters for the quota-balanced field builder.
@@ -70,25 +98,51 @@ def _compute_player_quantas(
         raise KeyError(
             "Ownership sheet missing required columns " f"{sorted(missing)}."
         )
-
     own = ownership_df.copy()
     own["player"] = own["player"].astype(str)
     # Aggregate by player in case of duplicates.
     own = (
-        own.groupby("player")["cpt_ownership", "flex_ownership"]  # type: ignore
+        own.groupby("player")[["cpt_ownership", "flex_ownership"]]  # type: ignore
         .sum()
         .reset_index()
     )
 
+    num_players = len(own)
+    if num_players == 0:
+        return {}, {}
+
+    # Convert ownership percentages to fractions.
+    p_cpt_raw = own["cpt_ownership"].to_numpy(dtype=float) / 100.0
+    p_flex_raw = own["flex_ownership"].to_numpy(dtype=float) / 100.0
+
+    total_cpt = float(p_cpt_raw.sum())
+    total_flex = float(p_flex_raw.sum())
+
+    if total_cpt > 0:
+        p_cpt = p_cpt_raw / total_cpt
+    else:
+        # Degenerate case: fall back to uniform CPT fractions.
+        p_cpt = np.full(num_players, 1.0 / num_players, dtype=float)
+
+    if total_flex > 0:
+        p_flex = p_flex_raw / total_flex
+    else:
+        # Degenerate case: fall back to uniform FLEX fractions.
+        p_flex = np.full(num_players, 1.0 / num_players, dtype=float)
+
+    total_cpt_slots = int(field_size)
+    total_flex_slots = int(5 * field_size)
+
+    base_cpt = _hamilton_rounding(p_cpt, total_cpt_slots)
+    base_flex = _hamilton_rounding(p_flex, total_flex_slots)
+
     cpt_quota: Dict[str, int] = {}
     flex_quota: Dict[str, int] = {}
 
-    for _, row in own.iterrows():
+    for idx, row in own.iterrows():
         name = str(row["player"])
-        p_cpt = float(row["cpt_ownership"]) / 100.0
-        p_flex = float(row["flex_ownership"]) / 100.0
-        cpt_quota[name] = int(round(p_cpt * field_size))
-        flex_quota[name] = int(round(p_flex * field_size))
+        cpt_quota[name] = int(base_cpt[idx]) if idx < len(base_cpt) else 0
+        flex_quota[name] = int(base_flex[idx]) if idx < len(base_flex) else 0
 
     return cpt_quota, flex_quota
 
