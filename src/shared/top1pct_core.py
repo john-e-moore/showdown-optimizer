@@ -21,6 +21,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from .field_builder import build_quota_balanced_field
+
 
 LINEUPS_SHEET_NAME = "Lineups"
 OWNERSHIP_SHEET_NAME = "Ownership"
@@ -537,6 +539,7 @@ def run_top1pct(
     field_var_shrink: float = 0.7,
     field_z_score: float = 2.0,
     flex_var_factor: float = 3.5,
+    field_model: str = "mixture",
 ) -> Path:
     """
     Execute the top 1% finish rate estimation pipeline for a given sport.
@@ -549,10 +552,16 @@ def run_top1pct(
         corr_excel: Optional explicit path to a correlation workbook.
         num_sims: Number of Monte Carlo simulations.
         random_seed: Optional RNG seed; if None, use nondeterministic seed.
-        field_var_shrink: Variance shrinkage factor for the modeled field.
-        field_z_score: Z-score for the upper tail of the field distribution.
+        field_var_shrink: Variance shrinkage factor for the modeled field when
+            using the analytic ownership-mixture field model.
+        field_z_score: Z-score for the upper tail of the analytic field
+            distribution.
         flex_var_factor: Effective variance factor for the aggregate flex-style
-            component.
+            component in the analytic field model.
+        field_model: Strategy for modeling the contest field:
+            - \"mixture\": current analytic ownership-mixture approximation.
+            - \"explicit\": simulate a quota-balanced field of lineups and take
+              empirical 99th-percentile thresholds from those scores.
 
     Returns:
         Path to the written output Excel workbook.
@@ -603,22 +612,53 @@ def run_top1pct(
     non_dst_k_mask = ~np.isin(positions, ["DST", "K"])
     X[:, non_dst_k_mask] = np.maximum(X[:, non_dst_k_mask], 0.0)
 
-    print("Computing field 99th percentile thresholds from ownership...")
-    thresholds = _compute_field_thresholds(
-        X=X,
-        cpt_own=cpt_own,
-        flex_own=flex_own,
-        field_var_shrink=field_var_shrink,
-        field_z_score=field_z_score,
-        flex_var_factor=flex_var_factor,
-    )
-
     player_index = {name: i for i, name in enumerate(player_names)}
     print("Scoring lineups across simulations...")
     W = _build_lineup_weights(lineups_df=lineups_df, player_index=player_index)
 
-    # scores[s, k] = sum_i w_k[i] * X[s, i]
-    scores = X @ W.T  # shape (S, K)
+    # scores[s, k] = sum_i w_k[i] * X[s, i] for candidate lineups.
+    scores = X @ W.T  # shape (S, K_candidates)
+
+    if field_model not in {"mixture", "explicit"}:
+        raise ValueError(
+            f\"Unsupported field_model '{field_model}'. Expected 'mixture' or 'explicit'.\"
+        )
+
+    if field_model == "mixture":
+        print("Computing field 99th percentile thresholds from ownership (mixture model)...")
+        thresholds = _compute_field_thresholds(
+            X=X,
+            cpt_own=cpt_own,
+            flex_own=flex_own,
+            field_var_shrink=field_var_shrink,
+            field_z_score=field_z_score,
+            flex_var_factor=flex_var_factor,
+        )
+    else:
+        print(
+            "Building explicit quota-balanced field lineups and computing "
+            "empirical 99th-percentile thresholds..."
+        )
+        field_lineups_df = build_quota_balanced_field(
+            field_size=field_size,
+            ownership_df=ownership_df,
+            sabersim_proj_df=sabersim_proj_df,
+            lineups_proj_df=lineups_proj_df,
+            corr_df=corr_df,
+            random_seed=random_seed,
+        )
+        W_field = _build_lineup_weights(
+            lineups_df=field_lineups_df,
+            player_index=player_index,
+        )
+        # scores_field[s, k] = sum_i w_k[i] * X[s, i] for field lineups.
+        scores_field = X @ W_field.T  # shape (S, K_field)
+        K_field = scores_field.shape[1]
+        if K_field == 0:
+            raise ValueError("Explicit field builder produced zero field lineups.")
+        # Empirical ~99th-percentile threshold per simulation using partial sort.
+        q_index = max(0, min(K_field - 1, int(np.floor(0.99 * K_field))))
+        thresholds = np.partition(scores_field, q_index, axis=1)[:, q_index]
     if thresholds.shape[0] != scores.shape[0]:
         raise ValueError("Thresholds array must have length equal to num_sims.")
 
@@ -653,6 +693,7 @@ def run_top1pct(
         {"key": "field_var_shrink", "value": field_var_shrink},
         {"key": "field_z_score", "value": field_z_score},
         {"key": "flex_var_factor", "value": flex_var_factor},
+        {"key": "field_model", "value": field_model},
         {"key": "lineups_workbook", "value": str(lineups_path)},
         {"key": "correlation_workbook", "value": str(corr_path)},
         {"key": "n_players", "value": len(player_names)},
