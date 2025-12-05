@@ -142,13 +142,46 @@ def _load_corr_workbook(
     return sabersim_proj_df, corr_df
 
 
+def _resolve_non_cpt_slot_columns(lineups_df: pd.DataFrame) -> List[str]:
+    """
+    Resolve non-CPT slot column names for a Showdown lineup DataFrame.
+
+    Supports both legacy FLEX-style naming (flex1–flex5) and UTIL-style naming
+    (util1–util5, used by NBA going forward).
+    """
+    flex_cols = [f"flex{j}" for j in range(1, 6)]
+    util_cols = [f"util{j}" for j in range(1, 6)]
+
+    flex_missing = [c for c in flex_cols if c not in lineups_df.columns]
+    util_missing = [c for c in util_cols if c not in lineups_df.columns]
+
+    if not flex_missing:
+        return flex_cols
+    if not util_missing:
+        return util_cols
+
+    raise KeyError(
+        "Lineups sheet missing expected non-CPT slot columns. "
+        f"Expected either FLEX-style {flex_cols} or UTIL-style {util_cols}."
+    )
+
+
 def _build_player_universe(
     lineups_df: pd.DataFrame,
     ownership_df: pd.DataFrame,
     sabersim_proj_df: pd.DataFrame,
     corr_df: pd.DataFrame,
     lineups_proj_df: pd.DataFrame,
-) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[
+    List[str],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     """
     Build unified player universe and aligned arrays.
 
@@ -172,12 +205,8 @@ def _build_player_universe(
 
     # Players from lineups sheet.
     lineup_player_names: List[str] = []
-    lineup_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
-    missing_cols = [c for c in lineup_cols if c not in lineups_df.columns]
-    if missing_cols:
-        raise KeyError(
-            f"Lineups sheet missing expected columns {missing_cols}."
-        )
+    non_cpt_cols = _resolve_non_cpt_slot_columns(lineups_df)
+    lineup_cols = ["cpt"] + non_cpt_cols
 
     for _, row in lineups_df.iterrows():
         for col in lineup_cols:
@@ -265,6 +294,8 @@ def _build_player_universe(
     mu_list: List[float] = []
     sigma_list: List[float] = []
     pos_list: List[str] = []
+    salary_list: List[float] = []
+    team_list: List[str] = []
 
     for name in universe_names:
         if name in mu_corr.index:
@@ -290,10 +321,21 @@ def _build_player_universe(
         mu_list.append(mu_val)
         sigma_list.append(sigma_val)
         pos_list.append(pos_val)
+        # Flex-style salary and team from lineup projections when available.
+        if name in lp_indexed.index:
+            salary_val = float(lp_indexed.at[name, "Salary"])
+            team_val = str(lp_indexed.at[name, "Team"])
+        else:
+            salary_val = 0.0
+            team_val = ""
+        salary_list.append(salary_val)
+        team_list.append(team_val)
 
     mu = np.array(mu_list, dtype=float)
     sigma = np.array(sigma_list, dtype=float)
     positions = np.array(pos_list, dtype=object)
+    salaries = np.array(salary_list, dtype=float)
+    teams = np.array(team_list, dtype=object)
 
     # Ownership: convert percentage columns to fractions.
     expected_own_cols = {"player", "cpt_ownership", "flex_ownership"}
@@ -332,7 +374,7 @@ def _build_player_universe(
     cpt_own = np.array(cpt_own_list, dtype=float)
     flex_own = np.array(flex_own_list, dtype=float)
 
-    return universe_names, mu, sigma, cpt_own, flex_own, positions
+    return universe_names, mu, sigma, cpt_own, flex_own, positions, salaries, teams
 
 
 def _build_full_correlation(
@@ -487,12 +529,8 @@ def _build_lineup_weights(
       - CPT player has weight 1.5.
       - Each flex-style player has weight 1.0 (weights add if duplicated).
     """
-    lineup_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
-    missing_cols = [c for c in lineup_cols if c not in lineups_df.columns]
-    if missing_cols:
-        raise KeyError(
-            f"Lineups sheet missing expected columns {missing_cols}."
-        )
+    non_cpt_cols = _resolve_non_cpt_slot_columns(lineups_df)
+    lineup_cols = ["cpt"] + non_cpt_cols
 
     K = len(lineups_df)
     P = len(player_index)
@@ -509,8 +547,8 @@ def _build_lineup_weights(
         else:
             W[k, idx] += 1.5
 
-        # Flex-style slots
-        for col in [f"flex{j}" for j in range(1, 6)]:
+        # Flex/UTIL-style slots
+        for col in non_cpt_cols:
             flex_name = _parse_player_name(row[col])
             idx = player_index.get(flex_name)
             if idx is None:
@@ -528,6 +566,96 @@ def _build_lineup_weights(
     return W
 
 
+def _annotate_lineups_with_meta(
+    lineups_df: pd.DataFrame,
+    player_names: List[str],
+    mu: np.ndarray,
+    salaries: np.ndarray,
+    teams: np.ndarray,
+    *,
+    sport: str | None = None,
+) -> pd.DataFrame:
+    """
+    Annotate a CPT + flex/UTIL lineups DataFrame with projection/salary/stack metadata.
+
+    Returns a DataFrame with:
+      - lineup_projection: 1.5× CPT projection + 1× each non-CPT slot projection.
+      - lineup_salary: same weighting pattern using flex-style salaries.
+      - stack: team-count pattern like "4|2" inferred from team counts.
+      - stack_pattern: reserved label column (empty for field-generated lineups).
+      - CPT and slot columns preserved from the input, with NBA slots exposed as
+        util1–util5 for convenience when sport == "nba".
+    """
+    if len(player_names) != mu.shape[0] or len(player_names) != salaries.shape[0]:
+        raise ValueError("Player arrays must have matching length.")
+
+    name_to_mu = {name: float(mu[i]) for i, name in enumerate(player_names)}
+    name_to_salary = {name: float(salaries[i]) for i, name in enumerate(player_names)}
+    name_to_team = {name: str(teams[i]) for i, name in enumerate(player_names)}
+
+    non_cpt_cols = _resolve_non_cpt_slot_columns(lineups_df)
+
+    records: List[Dict[str, object]] = []
+    for _, row in lineups_df.iterrows():
+        cpt_name = _parse_player_name(row["cpt"])
+        slot_names: List[str] = []
+        for col in non_cpt_cols:
+            slot_names.append(_parse_player_name(row[col]))
+
+        proj_cpt = 1.5 * name_to_mu.get(cpt_name, 0.0)
+        proj_flex = sum(name_to_mu.get(n, 0.0) for n in slot_names)
+        lineup_proj = proj_cpt + proj_flex
+
+        sal_cpt = 1.5 * name_to_salary.get(cpt_name, 0.0)
+        sal_flex = sum(name_to_salary.get(n, 0.0) for n in slot_names)
+        lineup_salary = sal_cpt + sal_flex
+
+        teams_in_lineup = [
+            name_to_team.get(cpt_name, ""),
+            *[name_to_team.get(n, "") for n in slot_names],
+        ]
+        team_counts: Dict[str, int] = {}
+        for t in teams_in_lineup:
+            if not t:
+                continue
+            team_counts[t] = team_counts.get(t, 0) + 1
+        counts_sorted = sorted(team_counts.values(), reverse=True)
+        stack_str = "|".join(str(c) for c in counts_sorted) if counts_sorted else ""
+
+        record: Dict[str, object] = {
+            "lineup_projection": lineup_proj,
+            "lineup_salary": lineup_salary,
+            "stack": stack_str,
+            "stack_pattern": "",
+            "cpt": row["cpt"],
+        }
+        for col in non_cpt_cols:
+            record[col] = row[col]
+
+        records.append(record)
+
+    annotated = pd.DataFrame(records)
+
+    # For NBA, prefer UTIL-style naming in outputs even if the internal columns
+    # used FLEX-style names.
+    if sport == "nba":
+        rename_map: Dict[str, str] = {}
+        for j in range(1, 6):
+            flex_col = f"flex{j}"
+            util_col = f"util{j}"
+            if flex_col in annotated.columns and util_col not in annotated.columns:
+                rename_map[flex_col] = util_col
+        if rename_map:
+            annotated = annotated.rename(columns=rename_map)
+
+    meta_cols = ["lineup_projection", "lineup_salary", "stack", "stack_pattern"]
+    slot_cols: List[str] = ["cpt"] + [
+        c for c in annotated.columns if c not in set(meta_cols + ["cpt"])
+    ]
+    annotated = annotated[meta_cols + slot_cols]
+    return annotated
+
+
 def run_top1pct(
     field_size: int,
     outputs_dir: Path,
@@ -540,6 +668,7 @@ def run_top1pct(
     field_z_score: float = 2.0,
     flex_var_factor: float = 3.5,
     field_model: str = "mixture",
+    run_dir: Path | None = None,
 ) -> Path:
     """
     Execute the top 1% finish rate estimation pipeline for a given sport.
@@ -562,6 +691,9 @@ def run_top1pct(
             - \"mixture\": current analytic ownership-mixture approximation.
             - \"explicit\": simulate a quota-balanced field of lineups and take
               empirical 99th-percentile thresholds from those scores.
+        run_dir: Optional explicit directory for the output workbook. When
+            provided, the top1pct workbook is written directly into this
+            directory instead of outputs_dir / \"top1pct\".
 
     Returns:
         Path to the written output Excel workbook.
@@ -585,6 +717,8 @@ def run_top1pct(
         cpt_own,
         flex_own,
         positions,
+        salaries,
+        teams,
     ) = _build_player_universe(
         lineups_df=lineups_df,
         ownership_df=ownership_df,
@@ -624,6 +758,8 @@ def run_top1pct(
             f"Unsupported field_model '{field_model}'. Expected 'mixture' or 'explicit'."
         )
 
+    field_lineups_with_meta: pd.DataFrame | None = None
+
     if field_model == "mixture":
         print("Computing field 99th percentile thresholds from ownership (mixture model)...")
         thresholds = _compute_field_thresholds(
@@ -659,6 +795,18 @@ def run_top1pct(
         # Empirical ~99th-percentile threshold per simulation using partial sort.
         q_index = max(0, min(K_field - 1, int(np.floor(0.99 * K_field))))
         thresholds = np.partition(scores_field, q_index, axis=1)[:, q_index]
+
+        # Build a Field Lineups sheet with per-lineup metadata for the explicit
+        # field model. Use a simple sport hint based on the outputs_dir.
+        sport_hint = outputs_dir.name.lower() if outputs_dir.name else None
+        field_lineups_with_meta = _annotate_lineups_with_meta(
+            lineups_df=field_lineups_df,
+            player_names=player_names,
+            mu=mu,
+            salaries=salaries,
+            teams=teams,
+            sport=sport_hint,
+        )
     if thresholds.shape[0] != scores.shape[0]:
         raise ValueError("Thresholds array must have length equal to num_sims.")
 
@@ -682,10 +830,14 @@ def run_top1pct(
     lineups_with_top1["top1_pct_finish_rate"] = 100.0 * p_top1
 
     # Prepare output path.
-    top1pct_dir = outputs_dir / "top1pct"
-    top1pct_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = top1pct_dir / f"top1pct_lineups_{timestamp}.xlsx"
+    if run_dir is not None:
+        output_path = run_dir / f"top1pct_lineups_{timestamp}.xlsx"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        top1pct_dir = outputs_dir / "top1pct"
+        top1pct_dir.mkdir(parents=True, exist_ok=True)
+        output_path = top1pct_dir / f"top1pct_lineups_{timestamp}.xlsx"
 
     meta_rows = [
         {"key": "field_size", "value": field_size},
@@ -707,6 +859,10 @@ def run_top1pct(
             writer, sheet_name="Lineups_Top1Pct", index=False
         )
         meta_df.to_excel(writer, sheet_name="Meta", index=False)
+        if field_lineups_with_meta is not None:
+            field_lineups_with_meta.to_excel(
+                writer, sheet_name="Field_Lineups", index=False
+            )
 
     print("Done.")
     return output_path

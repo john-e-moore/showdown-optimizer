@@ -25,6 +25,7 @@ def run(
     field_z_score: float = 2.0,
     flex_var_factor: float = 3.5,
     field_model: str = "mixture",
+    run_dir: Path | None = None,
 ) -> Path:
     return top1pct_core.run_top1pct(
         field_size=field_size,
@@ -37,6 +38,7 @@ def run(
         field_z_score=field_z_score,
         flex_var_factor=flex_var_factor,
         field_model=field_model,
+        run_dir=run_dir,
     )
 
 
@@ -121,6 +123,16 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
             "quota-balanced field of lineups and uses empirical thresholds."
         ),
     )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional directory in which to write the top1pct workbook. "
+            "When provided, the output Excel file is placed directly in this "
+            "directory instead of under outputs/nba/top1pct/."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -136,6 +148,7 @@ def main(argv: List[str] | None = None) -> None:
         field_z_score=args.field_z,
         flex_var_factor=args.flex_var_factor,
         field_model=args.field_model,
+        run_dir=Path(args.run_dir) if args.run_dir is not None else None,
     )
 
 

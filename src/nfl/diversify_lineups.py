@@ -28,17 +28,51 @@ def run(
     min_top1_pct: float = 1.0,
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
+    output_dir: str | None = None,
 ) -> Path:
     """
     NFL wrapper around the shared diversification core.
+
+    When output_dir is provided, this also writes convenient CSV sidecars:
+      - diversified.csv: diversified lineups
+      - ownership.csv: CPT/FLEX exposure summary
+    into that directory for downstream tooling.
     """
-    return diversify_core.run_diversify(
+    excel_path = diversify_core.run_diversify(
         num_lineups=num_lineups,
         outputs_dir=config.OUTPUTS_DIR,
         min_top1_pct=min_top1_pct,
         max_overlap=max_overlap,
         top1pct_excel=top1pct_excel,
     )
+    if output_dir is not None:
+        out_dir_path = Path(output_dir)
+        out_dir_path.mkdir(parents=True, exist_ok=True)
+
+        xls = pd.ExcelFile(excel_path)
+        try:
+            diversified_df = pd.read_excel(xls, sheet_name="Lineups_Diversified")
+        except ValueError as exc:
+            raise KeyError(
+                "Diversified workbook missing 'Lineups_Diversified' sheet: "
+                f"{excel_path}"
+            ) from exc
+        try:
+            exposure_df = pd.read_excel(xls, sheet_name="Exposure")
+        except ValueError as exc:
+            raise KeyError(
+                "Diversified workbook missing 'Exposure' sheet: "
+                f"{excel_path}"
+            ) from exc
+
+        diversified_csv_path = out_dir_path / "diversified.csv"
+        ownership_csv_path = out_dir_path / "ownership.csv"
+        print(f"Writing diversified CSV to {diversified_csv_path} ...")
+        diversified_df.to_csv(diversified_csv_path, index=False)
+        print(f"Writing ownership CSV to {ownership_csv_path} ...")
+        exposure_df.to_csv(ownership_csv_path, index=False)
+
+    return excel_path
 
 
 def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
@@ -81,6 +115,15 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
             "If omitted, the most recent .xlsx file in that directory is used."
         ),
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional directory in which to write diversified.csv and "
+            "ownership.csv sidecar files for this diversification run."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -91,6 +134,7 @@ def main(argv: List[str] | None = None) -> None:
         min_top1_pct=args.min_top1_pct,
         max_overlap=args.max_overlap,
         top1pct_excel=args.top1pct_excel,
+        output_dir=args.output_dir,
     )
 
 
