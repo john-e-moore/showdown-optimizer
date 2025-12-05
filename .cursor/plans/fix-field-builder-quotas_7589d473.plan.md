@@ -19,8 +19,8 @@ todos: []
 - Convert CPT and FLEX ownership to raw fractions, handle degenerate cases where totals are zero.
 - **Normalize** CPT fractions to sum to 1 (and similarly normalize FLEX fractions to sum to 1 for quota purposes).
 - Use a **Hamilton / largest-remainder rounding scheme** to:
-  - Allocate integer CPT quotas whose sum is exactly `field_size`.
-  - Allocate integer FLEX quotas whose sum is approximately `5 * field_size`.
+- Allocate integer CPT quotas whose sum is exactly `field_size`.
+- Allocate integer FLEX quotas whose sum is approximately `5 * field_size`.
 - Keep the rest of the builder (CPT / FLEX sampling, correlation logic) unchanged so that behavior is identical except for improved quota stability.
 
 ## Detailed Steps
@@ -30,12 +30,12 @@ todos: []
 - In `_compute_player_quantas` in `field_builder.py`:
 - Replace the `groupby` indexing `own.groupby("player")["cpt_ownership", "flex_ownership"]` with `own.groupby("player")[["cpt_ownership", "flex_ownership"]]` to eliminate the deprecation warning.
 - After aggregation, construct raw ownership fractions:
-  - `p_cpt_raw = own["cpt_ownership"] / 100.0`.
-  - `p_flex_raw = own["flex_ownership"] / 100.0`.
+- `p_cpt_raw = own["cpt_ownership"] / 100.0`.
+- `p_flex_raw = own["flex_ownership"] / 100.0`.
 - Compute totals `total_cpt`, `total_flex`.
-  - If `total_cpt <= 0`, fall back to uniform CPT fractions across players.
-  - Otherwise, define `p_cpt = p_cpt_raw / total_cpt` so that `sum(p_cpt) == 1`.
-  - Similarly, define `p_flex` normalized by `total_flex`, with a uniform fallback when `total_flex <= 0`.
+- If `total_cpt <= 0`, fall back to uniform CPT fractions across players.
+- Otherwise, define `p_cpt = p_cpt_raw / total_cpt` so that `sum(p_cpt) == 1`.
+- Similarly, define `p_flex` normalized by `total_flex`, with a uniform fallback when `total_flex <= 0`.
 
 ### 2. Implement Hamilton rounding for CPT quotas
 
@@ -65,7 +65,7 @@ todos: []
 
 - After implementation, run small ad-hoc checks (no permanent code needed, but easy to do in a REPL or temporary script):
 - For a real slate’s ownership DataFrame and a chosen `field_size`, call `_compute_player_quantas` and verify:
-  - `sum(cpt_quota.values()) == field_size`.
-  - `sum(flex_quota.values()) == 5 * field_size`.
+- `sum(cpt_quota.values()) == field_size`.
+- `sum(flex_quota.values()) == 5 * field_size`.
 - Run `python -m src.nfl.top1pct_finish_rate --field-size <contest_size> --num-sims 20000 --field-model explicit` and confirm there is no longer a `RuntimeError` about CPT quotas.
 - Optionally, compute realized CPT/FLEX usage in the generated field and compare to input ownerships to sanity check the distribution.
