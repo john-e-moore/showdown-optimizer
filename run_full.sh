@@ -42,7 +42,7 @@ fi
 
 SABERSIM_CSV="$1"
 FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-100}"
+NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
@@ -120,13 +120,13 @@ echo "================================================================"
 echo "Step 4/4: Selecting diversified lineups"
 echo "         Target diversified lineups: ${DIVERSIFIED_NUM}"
 echo "         Min top1% finish rate: 1.0%"
-echo "         Max player overlap: 4"
+echo "         Max player overlap: 5"
 echo "================================================================"
 
 python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
   --min-top1-pct 1.0 \
-  --max-overlap 4
+  --max-overlap 5
 
 echo
 echo "================================================================"
