@@ -17,7 +17,6 @@ This script:
 
 import argparse
 import csv
-import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -572,25 +571,22 @@ def run(
         name_role_to_id=name_role_to_id,
     )
 
-    outputs_root = config.OUTPUTS_DIR / "dkentries"
-    outputs_root.mkdir(parents=True, exist_ok=True)
-
-    # Determine timestamp directory for this run.
-    ts_str: Optional[str] = None
+    # Resolve output location.
     if output_csv is not None:
-        out_path_requested = Path(output_csv)
-        m = re.search(r"(\\d{8}_\\d{6})", out_path_requested.stem)
-        if m and out_path_requested.parent == outputs_root:
-            ts_str = m.group(1)
-
-    if ts_str is None:
+        # Honor an explicit output path (e.g. when called from run_full.sh with
+        # a per-run directory like outputs/nfl/runs/<timestamp>/).
+        output_path = Path(output_csv)
+        base_dir = output_path.parent
+        base_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # Default to a timestamped folder under outputs/nfl/dkentries/.
+        outputs_root = config.OUTPUTS_DIR / "dkentries"
+        outputs_root.mkdir(parents=True, exist_ok=True)
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    base_dir = outputs_root / ts_str
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
-    output_path = base_dir / "dkentries.csv"
+        base_dir = outputs_root / ts_str
+        base_dir.mkdir(parents=True, exist_ok=True)
+        # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
+        output_path = base_dir / "dkentries.csv"
     print(f"Writing filled DKEntries CSV to {output_path} ...")
     filled_df.to_csv(output_path, index=False)
     print("Done.")

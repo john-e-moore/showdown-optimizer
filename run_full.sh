@@ -42,7 +42,7 @@ fi
 
 SABERSIM_CSV="$1"
 FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-1000}"
+NUM_LINEUPS="${3:-500}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
@@ -134,7 +134,7 @@ echo "================================================================"
 
 python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 0.25 \
+  --min-top1-pct 0.1 \
   --max-overlap 5 \
   --output-dir "${RUN_DIR}"
 
