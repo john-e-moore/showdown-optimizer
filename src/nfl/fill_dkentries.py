@@ -5,7 +5,7 @@ Fill a DraftKings DKEntries CSV with diversified NFL Showdown lineups.
 
 This script:
   1. Resolves a DKEntries*.csv template (latest under data/nfl/dkentries/ by default).
-  2. Resolves the latest diversified lineups workbook under outputs/nfl/top1pct/.
+  2. Resolves the latest diversified lineups workbook under outputs/nfl/diversified/.
   3. Maps each lineup (CPT + 5 FLEX names) to DraftKings player IDs using the
      Name/ID/Roster Position dictionary embedded in the DKEntries CSV.
   4. Assigns lineups to DK entries in a fee-aware way, spreading player exposure
@@ -79,10 +79,10 @@ def _load_diversified_lineups(
     diversified_excel: Optional[str] = None,
 ) -> Tuple[Path, pd.DataFrame, List[LineupRecord]]:
     """
-    Load diversified lineups from the latest (or specified) top1pct workbook.
+    Load diversified lineups from the latest (or specified) diversified workbook.
     """
-    top1pct_dir = config.OUTPUTS_DIR / "top1pct"
-    workbook_path = _resolve_latest_excel(top1pct_dir, diversified_excel)
+    diversified_dir = config.OUTPUTS_DIR / "diversified"
+    workbook_path = _resolve_latest_excel(diversified_dir, diversified_excel)
 
     xls = pd.ExcelFile(workbook_path)
     try:
@@ -526,8 +526,9 @@ def run(
     Args:
         dkentries_csv: Optional explicit DKEntries CSV path. If None, the latest
             DKEntries*.csv under data/nfl/dkentries/ is used.
-        diversified_excel: Optional explicit path to a top1pct workbook. If
-            None, the latest .xlsx under outputs/nfl/top1pct/ is used.
+        diversified_excel: Optional explicit path to a diversified lineups
+            workbook. If None, the latest .xlsx under outputs/nfl/diversified/
+            is used.
         output_csv: Optional explicit output path. If None, a timestamped file
             under outputs/nfl/dkentries/ is created.
     """
@@ -630,9 +631,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Optional explicit path to a top1pct workbook containing "
-            f"'{LINEUPS_DIVERSIFIED_SHEET}' sheet. If omitted, the latest "
-            ".xlsx under outputs/nfl/top1pct/ is used."
+            "Optional explicit path to a diversified lineups workbook "
+            f"containing '{LINEUPS_DIVERSIFIED_SHEET}' sheet. If omitted, the "
+            "latest .xlsx under outputs/nfl/diversified/ is used."
         ),
     )
     parser.add_argument(

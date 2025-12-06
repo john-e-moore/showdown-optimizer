@@ -15,6 +15,7 @@ This module:
 """
 
 import argparse
+import pandas as pd
 from pathlib import Path
 from typing import List
 

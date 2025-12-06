@@ -248,12 +248,14 @@ def run_diversify(
 
     exposure_df = _compute_exposure(selected_df)
 
-    top1pct_dir = outputs_dir / "top1pct"
-    top1pct_dir.mkdir(parents=True, exist_ok=True)
+    # Write diversified lineups under a dedicated 'diversified' subdirectory so
+    # they do not collide with the raw top1pct workbooks.
+    diversified_dir = outputs_dir / "diversified"
+    diversified_dir.mkdir(parents=True, exist_ok=True)
 
     # Include num_lineups in the filename; timestamp is already part of the
     # underlying top1pct workbook used for selection.
-    output_path = top1pct_dir / f"top1pct_diversified_{num_lineups}.xlsx"
+    output_path = diversified_dir / f"top1pct_diversified_{num_lineups}.xlsx"
 
     print(f"Writing {len(selected_df)} diversified lineups to {output_path}...")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
