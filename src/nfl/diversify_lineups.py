@@ -39,12 +39,27 @@ def run(
       - ownership.csv: CPT/FLEX exposure summary
     into that directory for downstream tooling.
     """
+    # When running as part of the end-to-end pipeline, top1pct_finish_rate writes
+    # a run-scoped workbook under a per-run directory (e.g. outputs/nfl/runs/<ts>/).
+    # If the caller passed an output_dir (the run directory) and did not override
+    # top1pct_excel explicitly, prefer the latest top1pct_lineups_*.xlsx in that
+    # directory instead of falling back to outputs/nfl/top1pct/.
+    resolved_top1pct_excel = top1pct_excel
+    if resolved_top1pct_excel is None and output_dir is not None:
+        run_dir = Path(output_dir)
+        candidates = sorted(
+            run_dir.glob("top1pct_lineups_*.xlsx"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if candidates:
+            resolved_top1pct_excel = str(candidates[-1])
+
     excel_path = diversify_core.run_diversify(
         num_lineups=num_lineups,
         outputs_dir=config.OUTPUTS_DIR,
         min_top1_pct=min_top1_pct,
         max_overlap=max_overlap,
-        top1pct_excel=top1pct_excel,
+        top1pct_excel=resolved_top1pct_excel,
     )
     if output_dir is not None:
         out_dir_path = Path(output_dir)
