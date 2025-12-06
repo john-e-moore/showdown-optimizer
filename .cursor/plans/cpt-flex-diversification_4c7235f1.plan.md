@@ -7,7 +7,7 @@ todos:
     status: completed
   - id: flex-overlap-core
     content: Optionally extend diversify_core._greedy_diversified_selection to support a separate max_flex_overlap constraint while preserving existing behavior when unset.
-    status: in_progress
+    status: completed
   - id: field-ownership-targets
     content: Leverage _load_field_ownership_mapping in nfl fill_dkentries to compute per-player CPT and FLEX field ownership targets for use during assignment.
     status: completed
@@ -21,12 +21,12 @@ todos:
       - field-ownership-targets
   - id: ownership-summary-enhancements
     content: Update ownership.csv generation to clearly expose field targets vs realized lineup and dollar exposure, and verify outputs on sample runs.
-    status: pending
+    status: completed
     dependencies:
       - exposure-aware-assignment
   - id: docs-and-validation
     content: Run small-slate experiments to tune weights and overlap settings, then update README NFL docs to describe the new behavior and recommended usage.
-    status: pending
+    status: completed
     dependencies:
       - ownership-summary-enhancements
 ---

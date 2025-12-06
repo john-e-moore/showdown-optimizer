@@ -30,6 +30,7 @@ def run(
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
     output_dir: str | None = None,
+    max_flex_overlap: int | None = None,
 ) -> Path:
     """
     NFL wrapper around the shared diversification core.
@@ -60,6 +61,7 @@ def run(
         min_top1_pct=min_top1_pct,
         max_overlap=max_overlap,
         top1pct_excel=resolved_top1pct_excel,
+        max_flex_overlap=max_flex_overlap,
     )
     if output_dir is not None:
         out_dir_path = Path(output_dir)
@@ -123,6 +125,16 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-flex-overlap",
+        type=int,
+        default=None,
+        help=(
+            "Optional maximum number of overlapping FLEX players allowed between "
+            "any pair of selected lineups (0–5 for Showdown). If omitted, only "
+            "total player overlap (--max-overlap) is enforced."
+        ),
+    )
+    parser.add_argument(
         "--top1pct-excel",
         type=str,
         default=None,
@@ -151,6 +163,7 @@ def main(argv: List[str] | None = None) -> None:
         max_overlap=args.max_overlap,
         top1pct_excel=args.top1pct_excel,
         output_dir=args.output_dir,
+        max_flex_overlap=args.max_flex_overlap,
     )
 
 
