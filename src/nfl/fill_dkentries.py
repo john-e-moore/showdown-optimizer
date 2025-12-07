@@ -219,7 +219,9 @@ def _compute_realized_exposure(
     return exposure, num_entries, total_fees
 
 
-def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
+def _load_field_ownership_mapping(
+    lineups_excel: Optional[str] = None,
+) -> Dict[str, Dict[str, object]]:
     """
     Load per-player team and projected field ownership from the latest
     lineups workbook's Projections sheet (original SaberSim CSV).
@@ -238,7 +240,10 @@ def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
     """
     outputs_dir = config.OUTPUTS_DIR
     lineups_dir = outputs_dir / "lineups"
-    lineups_path = _resolve_latest_excel(lineups_dir, explicit=None)
+    # Prefer an explicit lineups workbook when provided (e.g., the run-scoped
+    # workbook produced by `run_full.sh`); otherwise fall back to the latest
+    # workbook under outputs/nfl/lineups/.
+    lineups_path = _resolve_latest_excel(lineups_dir, explicit=lineups_excel)
 
     xls = pd.ExcelFile(lineups_path)
     try:
@@ -323,6 +328,7 @@ def _write_ownership_summary_csv(
     filled_df: pd.DataFrame,
     slot_cols: Sequence[int],
     base_dir: Path,
+    field_ownership_map: Dict[str, Dict[str, object]],
 ) -> Path:
     """
     Write per-player ownership summary CSV alongside the filled DKEntries CSV.
@@ -339,11 +345,10 @@ def _write_ownership_summary_csv(
                            lineups where the player appears in that role
     """
     exposure, _, _ = _compute_realized_exposure(filled_df, slot_cols)
-    ownership_map = _load_field_ownership_mapping()
 
     rows: List[Dict[str, object]] = []
     for (player_name, role), metrics in exposure.items():
-        info = ownership_map.get(player_name, {})
+        info = field_ownership_map.get(player_name, {})
         team = str(info.get("team", "") or "")
         if role == "CPT":
             field_own = float(info.get("field_own_cpt", 0.0))
@@ -728,6 +733,7 @@ def run(
     cpt_own_weight: float = 1.0,
     flex_own_weight: float = 0.0,
     max_flex_overlap: Optional[int] = None,
+    lineups_excel: Optional[str] = None,
 ) -> Path:
     """
     Execute DKEntries filling with diversified NFL Showdown lineups.
@@ -749,6 +755,9 @@ def run(
         max_flex_overlap: Optional max number of shared FLEX players allowed
             between any pair of assigned lineups. If None, no hard FLEX cap
             is enforced during assignment.
+        lineups_excel: Optional explicit path to the lineups workbook whose
+            Projections sheet supplies projected field ownership. If None,
+            the latest .xlsx under outputs/nfl/lineups/ is used.
     """
     dkentries_path = dkentries_utils.resolve_latest_dkentries_csv(dkentries_csv)
     print(f"Using DKEntries template: {dkentries_path}")
@@ -785,7 +794,7 @@ def run(
     )
 
     # Load projected field ownership targets for CPT and FLEX roles.
-    field_ownership_raw = _load_field_ownership_mapping()
+    field_ownership_raw = _load_field_ownership_mapping(lineups_excel=lineups_excel)
     field_ownership_map = _normalize_field_ownership_map(field_ownership_raw)
 
     assignment = _assign_lineups_exposure_aware(
@@ -828,11 +837,13 @@ def run(
     print(f"Writing diversified lineups CSV to {diversified_csv_path} ...")
     diversified_df.to_csv(diversified_csv_path, index=False)
 
-    # Write ownership summary sidecar CSV.
+    # Write ownership summary sidecar CSV using the same field-ownership map
+    # that drove CPT/FLEX-aware assignment.
     _write_ownership_summary_csv(
         filled_df=filled_df,
         slot_cols=slot_cols,
         base_dir=base_dir,
+        field_ownership_map=field_ownership_map,
     )
 
     return output_path
@@ -903,6 +914,16 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "cap is enforced during DKEntries assignment."
         ),
     )
+    parser.add_argument(
+        "--lineups-excel",
+        type=str,
+        default=None,
+        help=(
+            "Optional explicit path to a lineups workbook whose Projections "
+            "sheet provides projected field ownership for CPT and FLEX roles. "
+            "If omitted, the latest .xlsx under outputs/nfl/lineups/ is used."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -915,6 +936,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         cpt_own_weight=args.cpt_own_weight,
         flex_own_weight=args.flex_own_weight,
         max_flex_overlap=args.max_flex_overlap,
+        lineups_excel=args.lineups_excel,
     )
 
 

@@ -41,8 +41,8 @@ if [[ "${#}" -lt 1 ]]; then
 fi
 
 SABERSIM_CSV="$1"
-FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-200}"
+FIELD_SIZE="${2:-7800}"
+NUM_LINEUPS="${3:-500}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
@@ -134,7 +134,7 @@ echo "================================================================"
 
 python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 0.025 \
+  --min-top1-pct 1.0 \
   --max-overlap 5 \
   --output-dir "${RUN_DIR}"
 
@@ -148,7 +148,8 @@ echo "================================================================"
 OUTPUT_DKENTRIES_CSV="${RUN_DIR}/dkentries_${timestamp}.csv"
 
 python -m src.nfl.fill_dkentries \
-  --output-csv "${OUTPUT_DKENTRIES_CSV}"
+  --output-csv "${OUTPUT_DKENTRIES_CSV}" \
+  --lineups-excel "${LINEUPS_EXCEL}"
 
 echo
 echo "All steps completed."
