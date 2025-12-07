@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import List
 
 from ..shared import diversify_core
-from . import config
+from . import config, fill_dkentries
 
 
 def run(
@@ -31,6 +31,8 @@ def run(
     top1pct_excel: str | None = None,
     output_dir: str | None = None,
     max_flex_overlap: int | None = None,
+    cpt_field_cap_multiplier: float | None = None,
+    lineups_excel: str | None = None,
 ) -> Path:
     """
     NFL wrapper around the shared diversification core.
@@ -55,6 +57,49 @@ def run(
         if candidates:
             resolved_top1pct_excel = str(candidates[-1])
 
+    # Build an optional CPT max-share map from projected field ownership when
+    # the caller has requested a field-aware cap.
+    cpt_max_share: dict[str, float] | None = None
+    if cpt_field_cap_multiplier is not None and cpt_field_cap_multiplier > 0.0:
+        # Resolve the lineups workbook used for field ownership. Prefer a
+        # run-scoped lineups workbook under the provided output_dir when
+        # available, otherwise fall back to the latest under outputs/nfl/lineups/.
+        resolved_lineups_excel = lineups_excel
+        if resolved_lineups_excel is None and output_dir is not None:
+            run_dir = Path(output_dir)
+            lineups_candidates = sorted(
+                run_dir.glob("lineups_*.xlsx"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            if lineups_candidates:
+                resolved_lineups_excel = str(lineups_candidates[-1])
+
+        try:
+            field_map_raw = fill_dkentries._load_field_ownership_mapping(
+                lineups_excel=resolved_lineups_excel
+            )
+            field_map = fill_dkentries._normalize_field_ownership_map(field_map_raw)
+            cpt_max_share = {}
+            for name, info in field_map.items():
+                try:
+                    field_own_cpt = float(info.get("field_own_cpt", 0.0))
+                except (TypeError, ValueError):
+                    field_own_cpt = 0.0
+                if field_own_cpt <= 0.0:
+                    continue
+                max_share = (field_own_cpt / 100.0) * float(cpt_field_cap_multiplier)
+                if max_share > 1.0:
+                    max_share = 1.0
+                cpt_max_share[name] = max_share
+        except Exception as exc:  # pragma: no cover - defensive
+            # If anything goes wrong loading field ownership, fall back to
+            # diversification without CPT caps rather than failing the run.
+            print(
+                "Warning: failed to build CPT field-aware caps; proceeding without "
+                f"CPT caps. Error: {exc}"
+            )
+            cpt_max_share = None
+
     excel_path = diversify_core.run_diversify(
         num_lineups=num_lineups,
         outputs_dir=config.OUTPUTS_DIR,
@@ -62,6 +107,7 @@ def run(
         max_overlap=max_overlap,
         top1pct_excel=resolved_top1pct_excel,
         max_flex_overlap=max_flex_overlap,
+        cpt_max_share=cpt_max_share,
     )
     if output_dir is not None:
         out_dir_path = Path(output_dir)
@@ -135,6 +181,27 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cpt-field-cap-multiplier",
+        type=float,
+        default=2.0,
+        help=(
+            "Multiple of projected field CPT ownership to use as a max CPT share "
+            "cap within the diversified set. Set <= 0 to disable CPT caps."
+        ),
+    )
+    parser.add_argument(
+        "--lineups-excel",
+        type=str,
+        default=None,
+        help=(
+            "Optional explicit path to a lineups workbook whose Projections sheet "
+            "provides projected field ownership. If omitted, a run-scoped "
+            "lineups_*.xlsx under the output run directory is preferred when "
+            "available; otherwise, the latest .xlsx under outputs/nfl/lineups/ "
+            "is used."
+        ),
+    )
+    parser.add_argument(
         "--top1pct-excel",
         type=str,
         default=None,
@@ -164,6 +231,8 @@ def main(argv: List[str] | None = None) -> None:
         top1pct_excel=args.top1pct_excel,
         output_dir=args.output_dir,
         max_flex_overlap=args.max_flex_overlap,
+        cpt_field_cap_multiplier=args.cpt_field_cap_multiplier,
+        lineups_excel=args.lineups_excel,
     )
 
 

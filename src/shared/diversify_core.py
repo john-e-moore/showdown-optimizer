@@ -98,6 +98,7 @@ def _greedy_diversified_selection(
     max_overlap: int,
     min_top1_pct: float,
     max_flex_overlap: int | None = None,
+    cpt_max_share: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """
     Greedily select up to num_lineups diversified lineups.
@@ -138,8 +139,13 @@ def _greedy_diversified_selection(
     selected_rows: List[Dict[str, object]] = []
     selected_sets: List[FrozenSet[str]] = []
     selected_flex_sets: List[FrozenSet[str]] = []
+    # Track CPT counts to optionally enforce per-player CPT share caps.
+    cpt_counts: Dict[str, int] = {}
+    selected_count = 0
 
     for _, row in candidates.iterrows():
+        # Parse CPT name for this candidate lineup.
+        cpt_name = _parse_player_name(row["cpt"])
         player_set: FrozenSet[str] = row["_player_set"]
         flex_set: FrozenSet[str] = row["_flex_set"]
         # Enforce max_overlap constraint against all previously selected lineups.
@@ -151,9 +157,20 @@ def _greedy_diversified_selection(
             if any(len(flex_set & s) > max_flex_overlap for s in selected_flex_sets):
                 continue
 
+        # Optionally enforce a CPT exposure cap relative to the diversified set.
+        if cpt_max_share is not None:
+            current_cpt_count = cpt_counts.get(cpt_name, 0)
+            future_selected_count = selected_count + 1
+            future_share = (current_cpt_count + 1) / future_selected_count
+            max_share = cpt_max_share.get(cpt_name, 1.0)
+            if future_share > max_share:
+                continue
+
         selected_rows.append(row.to_dict())
         selected_sets.append(player_set)
         selected_flex_sets.append(flex_set)
+        selected_count += 1
+        cpt_counts[cpt_name] = cpt_counts.get(cpt_name, 0) + 1
 
         if len(selected_rows) >= num_lineups:
             break
@@ -241,6 +258,7 @@ def run_diversify(
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
     max_flex_overlap: int | None = None,
+    cpt_max_share: dict[str, float] | None = None,
 ) -> Path:
     """
     Execute diversification over top1pct lineups for a given sport.
@@ -279,6 +297,7 @@ def run_diversify(
         max_overlap=max_overlap,
         min_top1_pct=min_top1_pct,
         max_flex_overlap=max_flex_overlap,
+        cpt_max_share=cpt_max_share,
     )
 
     exposure_df = _compute_exposure(selected_df)

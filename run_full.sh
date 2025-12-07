@@ -136,6 +136,9 @@ python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
   --min-top1-pct 1.0 \
   --max-overlap 5 \
+  --max-flex-overlap 5 \
+  --cpt-field-cap-multiplier 2.0 \
+  --lineups-excel "${LINEUPS_EXCEL}" \
   --output-dir "${RUN_DIR}"
 
 echo
