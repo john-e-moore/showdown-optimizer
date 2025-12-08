@@ -157,11 +157,13 @@ def _greedy_diversified_selection(
             if any(len(flex_set & s) > max_flex_overlap for s in selected_flex_sets):
                 continue
 
-        # Optionally enforce a CPT exposure cap relative to the diversified set.
-        if cpt_max_share is not None:
+        # Optionally enforce a CPT exposure cap relative to the *target* diversified
+        # set size (num_lineups), not just the number of lineups selected so far.
+        # This prevents early lineups from being rejected when max_share < 1.0
+        # simply because future_selected_count == 1.
+        if cpt_max_share is not None and num_lineups > 0:
             current_cpt_count = cpt_counts.get(cpt_name, 0)
-            future_selected_count = selected_count + 1
-            future_share = (current_cpt_count + 1) / future_selected_count
+            future_share = (current_cpt_count + 1) / num_lineups
             max_share = cpt_max_share.get(cpt_name, 1.0)
             if future_share > max_share:
                 continue
