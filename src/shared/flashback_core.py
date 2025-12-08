@@ -756,6 +756,8 @@ def _build_entrant_summary(
         "Top 20%": "mean",
         "Avg Points": "mean",
     }
+    if "Actual ROI" in simulation_df.columns:
+        agg_spec["Actual ROI"] = "mean"
     if "Sim ROI" in simulation_df.columns:
         agg_spec["Sim ROI"] = "mean"
 
@@ -782,6 +784,8 @@ def _build_entrant_summary(
     # Early exit for empty input.
     if summary.empty:
         cols = ["Entrant", "Entries"]
+        if "Actual ROI" in summary.columns:
+            cols.append("Actual ROI")
         if "Avg. Sim ROI" in summary.columns:
             cols.append("Avg. Sim ROI")
         cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
@@ -860,6 +864,8 @@ def _build_entrant_summary(
 
     # Final column ordering: base columns, then all CPT usage columns, then flex usage.
     base_cols = ["Entrant", "Entries"]
+    if "Actual ROI" in summary.columns:
+        base_cols.append("Actual ROI")
     if "Avg. Sim ROI" in summary.columns:
         base_cols.append("Avg. Sim ROI")
     base_cols.extend(["Avg. Top 1%", "Avg. Top 5%", "Avg. Top 20%", "Avg Points"])
