@@ -75,7 +75,7 @@ VAL_SEASONS: Final[range] = range(2024, 2025)    # 2024
 TEST_SEASONS: Final[range] = range(2024, 2025)   # 2024 (reuse for test)
 
 # Offensive positions to include downstream (plus optional K)
-OFFENSIVE_POSITIONS: Final[List[str]] = ["QB", "RB", "WR", "TE", "K"]
+OFFENSIVE_POSITIONS: Final[List[str]] = ["QB", "RB", "WR", "TE", "K", "DST"]
 
 
 # -----------------------------------------------------------------------------

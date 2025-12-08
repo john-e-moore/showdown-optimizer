@@ -205,6 +205,9 @@ python -m src.nfl.diversify_lineups \
   - **`--max-overlap`**: Maximum overlapping players allowed between any pair
     of selected lineups (\(0\)–\(6\) for Showdown).
     - Default: `4`.
+  - **`--max-flex-overlap`**: Optional maximum number of overlapping FLEX
+    players allowed between any pair of selected lineups (\(0\)–\(5\)).
+    - Default: omitted (no FLEX-specific cap; only `--max-overlap` is used).
   - **`--top1pct-excel`**: Path to a top1% workbook under `outputs/nfl/top1pct/`.
     - Default: most recent `.xlsx` in that directory.
 
@@ -262,13 +265,26 @@ python -m src.nfl.fill_dkentries \
     - Default: latest `.xlsx` under `outputs/nfl/top1pct/`.
   - **`--output-csv`**: Explicit output CSV path.
     - Default: timestamped folder under `outputs/nfl/dkentries/`.
+  - **`--cpt-own-weight`**: Weight on CPT dollar-exposure matching vs lineup
+    strength. Higher values make realized CPT dollar exposure more closely
+    track projected field CPT ownership.
+    - Default: `1.0`.
+  - **`--flex-own-weight`**: Weight on FLEX exposure diversification penalty.
+    Set `> 0` to encourage FLEX dollar exposure to track projected field FLEX
+    ownership.
+    - Default: `0.0` (disabled).
+  - **`--max-flex-overlap`**: Optional maximum number of overlapping FLEX
+    players allowed between any pair of assigned lineups. If omitted, no hard
+    FLEX overlap cap is enforced at assignment time.
 
 - **Output:**
   - Creates a timestamped directory under `outputs/nfl/dkentries/<YYYYMMDD_HHMMSS>/`
     containing:
     - `dkentries.csv`: DK upload‑ready file.
     - `diversified.csv`: diversified lineups used.
-    - `ownership.csv`: realized ownership summary.
+    - `ownership.csv`: realized ownership summary with projected field
+      ownership (`field_ownership`) and realized lineup/dollar exposure
+      (`lineup_exposure`, `dollar_exposure`) by player and role.
 
 ### NFL historical data downloader – `src.nfl.download_nfl_data`
 

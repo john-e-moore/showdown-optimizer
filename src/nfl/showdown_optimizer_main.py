@@ -220,6 +220,15 @@ def main() -> None:
             "If omitted in multi-stack mode, all patterns are weighted equally."
         ),
     )
+    parser.add_argument(
+        "--output-excel",
+        type=str,
+        default=None,
+        help=(
+            "Optional explicit path for the output Excel workbook. "
+            "If omitted, a timestamped file is written under outputs/nfl/lineups/."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -502,9 +511,13 @@ def main() -> None:
     # Write Excel workbook with projections, ownership, exposure, and lineups.
     # ------------------------------------------------------------------
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    lineups_dir = Path(config.OUTPUTS_DIR) / "lineups"
-    lineups_dir.mkdir(parents=True, exist_ok=True)
-    output_path = lineups_dir / f"lineups_{timestamp}.xlsx"
+    if args.output_excel:
+        output_path = Path(args.output_excel)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        lineups_dir = Path(config.OUTPUTS_DIR) / "lineups"
+        lineups_dir.mkdir(parents=True, exist_ok=True)
+        output_path = lineups_dir / f"lineups_{timestamp}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         sabersim_df.to_excel(writer, sheet_name="Projections", index=False)

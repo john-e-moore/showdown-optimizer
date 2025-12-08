@@ -41,7 +41,7 @@ if [[ "${#}" -lt 1 ]]; then
 fi
 
 SABERSIM_CSV="$1"
-FIELD_SIZE="${2:-500}"
+FIELD_SIZE="${2:-1000}"
 NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
@@ -64,7 +64,9 @@ if [[ ! -f "${SABERSIM_CSV}" ]]; then
 fi
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
-CORR_EXCEL="outputs/nfl/correlations/showdown_corr_matrix_${timestamp}.xlsx"
+RUN_DIR="outputs/nfl/runs/${timestamp}"
+mkdir -p "${RUN_DIR}"
+CORR_EXCEL="${RUN_DIR}/correlations_${timestamp}.xlsx"
 
 echo "================================================================"
 echo "Step 1/4: Building correlation matrix from '${SABERSIM_CSV}'"
@@ -98,10 +100,13 @@ if [[ -n "${STACK_WEIGHTS}" ]]; then
   OPT_STACK_WEIGHTS=(--stack-weights "${STACK_WEIGHTS}")
 fi
 
+LINEUPS_EXCEL="${RUN_DIR}/lineups_${timestamp}.xlsx"
+
 python -m src.nfl.showdown_optimizer_main \
   --sabersim-glob "${SABERSIM_CSV}" \
   --num-lineups "${NUM_LINEUPS}" \
   --salary-cap "${SALARY_CAP}" \
+  --output-excel "${LINEUPS_EXCEL}" \
   "${OPT_STACK_MODE[@]}" \
   "${OPT_STACK_WEIGHTS[@]}"
 
@@ -109,38 +114,45 @@ echo
 echo "================================================================"
 echo "Step 3/4: Estimating top 1% finish probabilities"
 echo "         Field size: ${FIELD_SIZE}"
-echo "         Using latest lineups & correlations workbooks."
+echo "         Using run-scoped lineups & correlations workbooks."
 echo "================================================================"
 
 python -m src.nfl.top1pct_finish_rate \
-  --field-size "${FIELD_SIZE}"
+  --field-size "${FIELD_SIZE}" \
+  --lineups-excel "${LINEUPS_EXCEL}" \
+  --corr-excel "${CORR_EXCEL}" \
+  --field-model "explicit" \
+  --run-dir "${RUN_DIR}"
 
 echo
 echo "================================================================"
 echo "Step 4/4: Selecting diversified lineups"
 echo "         Target diversified lineups: ${DIVERSIFIED_NUM}"
-echo "         Min top1% finish rate: 1.0%"
+echo "         Min top1% finish rate: 0.25%"
 echo "         Max player overlap: 5"
 echo "================================================================"
 
 python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 1.0 \
-  --max-overlap 5
+  --min-top1-pct 0.25 \
+  --max-overlap 5 \
+  --max-flex-overlap 5 \
+  --cpt-field-cap-multiplier 2.0 \
+  --lineups-excel "${LINEUPS_EXCEL}" \
+  --output-dir "${RUN_DIR}"
 
 echo
 echo "================================================================"
 echo "Step 5: Filling DKEntries CSV with diversified lineups"
 echo "         Using latest DKEntries template under data/nfl/dkentries/"
-echo "         Writing DK-upload-ready CSV under outputs/nfl/dkentries/"
+echo "         Writing DK-upload-ready CSV under ${RUN_DIR}/"
 echo "================================================================"
 
-OUTPUT_DKENTRIES_DIR="outputs/nfl/dkentries"
-mkdir -p "${OUTPUT_DKENTRIES_DIR}"
-OUTPUT_DKENTRIES_CSV="${OUTPUT_DKENTRIES_DIR}/DKEntries_${timestamp}.csv"
+OUTPUT_DKENTRIES_CSV="${RUN_DIR}/dkentries_${timestamp}.csv"
 
 python -m src.nfl.fill_dkentries \
-  --output-csv "${OUTPUT_DKENTRIES_CSV}"
+  --output-csv "${OUTPUT_DKENTRIES_CSV}" \
+  --lineups-excel "${LINEUPS_EXCEL}"
 
 echo
 echo "All steps completed."

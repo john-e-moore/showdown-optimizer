@@ -5,7 +5,7 @@ Fill a DraftKings DKEntries CSV with diversified NFL Showdown lineups.
 
 This script:
   1. Resolves a DKEntries*.csv template (latest under data/nfl/dkentries/ by default).
-  2. Resolves the latest diversified lineups workbook under outputs/nfl/top1pct/.
+  2. Resolves the latest diversified lineups workbook under outputs/nfl/diversified/.
   3. Maps each lineup (CPT + 5 FLEX names) to DraftKings player IDs using the
      Name/ID/Roster Position dictionary embedded in the DKEntries CSV.
   4. Assigns lineups to DK entries in a fee-aware way, spreading player exposure
@@ -17,12 +17,11 @@ This script:
 
 import argparse
 import csv
-import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -79,10 +78,10 @@ def _load_diversified_lineups(
     diversified_excel: Optional[str] = None,
 ) -> Tuple[Path, pd.DataFrame, List[LineupRecord]]:
     """
-    Load diversified lineups from the latest (or specified) top1pct workbook.
+    Load diversified lineups from the latest (or specified) diversified workbook.
     """
-    top1pct_dir = config.OUTPUTS_DIR / "top1pct"
-    workbook_path = _resolve_latest_excel(top1pct_dir, diversified_excel)
+    diversified_dir = config.OUTPUTS_DIR / "diversified"
+    workbook_path = _resolve_latest_excel(diversified_dir, diversified_excel)
 
     xls = pd.ExcelFile(workbook_path)
     try:
@@ -220,7 +219,9 @@ def _compute_realized_exposure(
     return exposure, num_entries, total_fees
 
 
-def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
+def _load_field_ownership_mapping(
+    lineups_excel: Optional[str] = None,
+) -> Dict[str, Dict[str, object]]:
     """
     Load per-player team and projected field ownership from the latest
     lineups workbook's Projections sheet (original SaberSim CSV).
@@ -239,7 +240,10 @@ def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
     """
     outputs_dir = config.OUTPUTS_DIR
     lineups_dir = outputs_dir / "lineups"
-    lineups_path = _resolve_latest_excel(lineups_dir, explicit=None)
+    # Prefer an explicit lineups workbook when provided (e.g., the run-scoped
+    # workbook produced by `run_full.sh`); otherwise fall back to the latest
+    # workbook under outputs/nfl/lineups/.
+    lineups_path = _resolve_latest_excel(lineups_dir, explicit=lineups_excel)
 
     xls = pd.ExcelFile(lineups_path)
     try:
@@ -296,10 +300,35 @@ def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
     return mapping
 
 
+def _normalize_field_ownership_map(
+    mapping: Dict[str, Dict[str, object]]
+) -> Dict[str, Dict[str, object]]:
+    """
+    Ensure field_own_cpt and field_own_flex values are numeric percentages.
+    """
+    normalized: Dict[str, Dict[str, object]] = {}
+    for name, info in mapping.items():
+        try:
+            cpt = float(info.get("field_own_cpt", 0.0))
+        except (TypeError, ValueError):
+            cpt = 0.0
+        try:
+            flex = float(info.get("field_own_flex", 0.0))
+        except (TypeError, ValueError):
+            flex = 0.0
+        normalized[name] = {
+            "team": str(info.get("team", "") or ""),
+            "field_own_cpt": cpt,
+            "field_own_flex": flex,
+        }
+    return normalized
+
+
 def _write_ownership_summary_csv(
     filled_df: pd.DataFrame,
     slot_cols: Sequence[int],
     base_dir: Path,
+    field_ownership_map: Dict[str, Dict[str, object]],
 ) -> Path:
     """
     Write per-player ownership summary CSV alongside the filled DKEntries CSV.
@@ -309,17 +338,17 @@ def _write_ownership_summary_csv(
         - team: team abbreviation (when available)
         - role: 'CPT' or 'FLEX'
         - field_ownership: projected field ownership (%) for that role
-        - lineup_exposure: percentage of DK entries containing the player
-                           in that role
-        - dollar_exposure: percentage of total entry fees allocated to
+                           (target we are trying to track)
+        - lineup_exposure: realized percentage of DK entries containing the
+                           player in that role (count-based)
+        - dollar_exposure: realized percentage of total entry fees allocated to
                            lineups where the player appears in that role
     """
     exposure, _, _ = _compute_realized_exposure(filled_df, slot_cols)
-    ownership_map = _load_field_ownership_mapping()
 
     rows: List[Dict[str, object]] = []
     for (player_name, role), metrics in exposure.items():
-        info = ownership_map.get(player_name, {})
+        info = field_ownership_map.get(player_name, {})
         team = str(info.get("team", "") or "")
         if role == "CPT":
             field_own = float(info.get("field_own_cpt", 0.0))
@@ -480,6 +509,188 @@ def _assign_lineups_fee_aware(
     return assignment
 
 
+def _assign_lineups_exposure_aware(
+    dk_df: pd.DataFrame,
+    records: Sequence[LineupRecord],
+    field_ownership_map: Dict[str, Dict[str, object]],
+    cpt_own_weight: float,
+    flex_own_weight: float,
+    max_flex_overlap: Optional[int],
+) -> Dict[int, LineupRecord]:
+    """
+    Assign lineups to DK entries in an exposure-aware, fee-weighted way.
+
+    Strategy:
+      - Process DK entries in descending Entry Fee, breaking ties by original
+        row order.
+      - Track realized CPT and FLEX dollar exposure per player across assigned
+        entries.
+      - For each entry, among remaining unassigned lineups:
+          * Minimize an exposure cost that measures how far CPT (and optionally
+            FLEX) dollar exposure would move from projected field ownership.
+          * Break ties by preferring stronger lineups.
+      - Optionally enforce a hard cap on FLEX-only overlap between any pair of
+        assigned lineups via max_flex_overlap.
+    """
+    if ENTRY_ID_COLUMN not in dk_df.columns:
+        raise KeyError(f"DKEntries CSV is missing '{ENTRY_ID_COLUMN}' column.")
+    if ENTRY_FEE_COLUMN not in dk_df.columns:
+        raise KeyError(f"DKEntries CSV is missing '{ENTRY_FEE_COLUMN}' column.")
+
+    entry_mask = dk_df[ENTRY_ID_COLUMN].notna() & (
+        dk_df[ENTRY_ID_COLUMN].astype(str).str.strip() != ""
+    )
+    entry_indices = [int(i) for i in dk_df.index[entry_mask]]
+
+    if not entry_indices:
+        raise ValueError("DKEntries CSV contains no rows with a non-empty Entry ID.")
+
+    if len(records) < len(entry_indices):
+        raise ValueError(
+            f"Not enough diversified lineups ({len(records)}) to cover "
+            f"{len(entry_indices)} DK entries."
+        )
+
+    # Normalize Entry Fee to numeric for sorting / weighting.
+    fees = dk_df.loc[entry_indices, ENTRY_FEE_COLUMN]
+    try:
+        fee_values = fees.astype(float)
+    except ValueError:
+        # Fallback: strip '$' and commas then convert.
+        fee_values = (
+            fees.astype(str)
+            .str.replace("$", "", regex=False)
+            .str.replace(",", "", regex=False)
+            .astype(float)
+        )
+
+    fee_by_row: Dict[int, float] = {
+        int(idx): float(fee_values.loc[idx]) for idx in entry_indices
+    }
+    total_fees = float(sum(fee_by_row.values()))
+    if total_fees <= 0.0:
+        raise ValueError("Total Entry Fee across DK entries is non-positive.")
+
+    # Helper to fetch projected field ownership for a (player, role).
+    def _get_field_pct(name: str, role: str) -> float:
+        info = field_ownership_map.get(name)
+        if not info:
+            return 0.0
+        key = "field_own_cpt" if role == "CPT" else "field_own_flex"
+        try:
+            return float(info.get(key, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Track realized dollar exposure per player and role.
+    cpt_dollar_exposure: Dict[str, float] = defaultdict(float)
+    flex_dollar_exposure: Dict[str, float] = defaultdict(float)
+
+    # Precompute FLEX-only player sets per lineup for overlap checks.
+    flex_sets: Dict[int, Set[str]] = {rec.idx: set(rec.players[1:]) for rec in records}
+    assigned_flex_sets: List[Set[str]] = []
+
+    # State: which lineups are still available.
+    remaining: Dict[int, LineupRecord] = {rec.idx: rec for rec in records}
+
+    # Order entries: high fee first, then by row index.
+    sorted_entries = sorted(
+        entry_indices,
+        key=lambda idx: (-fee_by_row[idx], idx),
+    )
+
+    assignment: Dict[int, LineupRecord] = {}
+
+    def _pct_from_fee(fee_sum: float) -> float:
+        return 100.0 * fee_sum / total_fees if total_fees > 0.0 else 0.0
+
+    for row_idx in sorted_entries:
+        fee = fee_by_row[row_idx]
+
+        best_key: Optional[Tuple[float, float]] = None
+        best_rec: Optional[LineupRecord] = None
+
+        def consider(rec: LineupRecord) -> None:
+            nonlocal best_key, best_rec
+
+            cpt_name = rec.players[0]
+
+            # CPT dollar-exposure incremental squared error vs field target.
+            current_cpt_fee = cpt_dollar_exposure.get(cpt_name, 0.0)
+            curr_cpt_pct = _pct_from_fee(current_cpt_fee)
+            new_cpt_pct = _pct_from_fee(current_cpt_fee + fee)
+            target_cpt_pct = _get_field_pct(cpt_name, "CPT")
+            delta_cpt = (new_cpt_pct - target_cpt_pct) ** 2 - (
+                curr_cpt_pct - target_cpt_pct
+            ) ** 2
+
+            # Optional FLEX exposure penalty (dollar-weighted).
+            delta_flex = 0.0
+            if flex_own_weight != 0.0:
+                for name in rec.players[1:]:
+                    current_fee = flex_dollar_exposure.get(name, 0.0)
+                    curr_pct = _pct_from_fee(current_fee)
+                    new_pct = _pct_from_fee(current_fee + fee)
+                    target_pct = _get_field_pct(name, "FLEX")
+                    delta_flex += (new_pct - target_pct) ** 2 - (
+                        curr_pct - target_pct
+                    ) ** 2
+
+            # Combine exposure costs; tie-break by lineup strength.
+            exposure_cost = cpt_own_weight * delta_cpt + flex_own_weight * delta_flex
+            key = (exposure_cost, -rec.strength)
+
+            if best_key is None or key < best_key:
+                best_key = key
+                best_rec = rec
+
+        # First pass: enforce max_flex_overlap when configured.
+        for rec in remaining.values():
+            if max_flex_overlap is not None and max_flex_overlap >= 0:
+                rec_flex = flex_sets.get(rec.idx, set())
+                # If any assigned lineup shares too many FLEX players, skip.
+                if any(
+                    len(rec_flex & assigned) > max_flex_overlap
+                    for assigned in assigned_flex_sets
+                ):
+                    continue
+            consider(rec)
+
+        # If no lineup was selected (overly strict max_flex_overlap), retry without FLEX cap.
+        if best_rec is None:
+            for rec in remaining.values():
+                consider(rec)
+
+        if best_rec is None:
+            raise RuntimeError(
+                "Internal error: failed to select a lineup for entry "
+                f"at row index {row_idx}."
+            )
+
+        assignment[row_idx] = best_rec
+
+        # Update realized CPT/FLEX dollar exposure.
+        cpt_name = best_rec.players[0]
+        cpt_dollar_exposure[cpt_name] += fee
+        for name in best_rec.players[1:]:
+            flex_dollar_exposure[name] += fee
+
+        # Track FLEX-only overlap state.
+        assigned_flex_sets.append(flex_sets.get(best_rec.idx, set()))
+
+        # Remove from remaining pool.
+        del remaining[best_rec.idx]
+
+    # Optional: print a small exposure summary for sanity checking.
+    print("CPT dollar-exposure summary (player: % of total fees):")
+    for name in sorted(cpt_dollar_exposure.keys()):
+        pct = _pct_from_fee(cpt_dollar_exposure[name])
+        target = _get_field_pct(name, "CPT")
+        print(f"  {name}: realized={pct:.2f}%, field_target={target:.2f}%")
+
+    return assignment
+
+
 def _apply_assignments_to_dkentries(
     dk_df: pd.DataFrame,
     slot_cols: Sequence[int],
@@ -519,6 +730,10 @@ def run(
     dkentries_csv: Optional[str] = None,
     diversified_excel: Optional[str] = None,
     output_csv: Optional[str] = None,
+    cpt_own_weight: float = 1.0,
+    flex_own_weight: float = 0.0,
+    max_flex_overlap: Optional[int] = None,
+    lineups_excel: Optional[str] = None,
 ) -> Path:
     """
     Execute DKEntries filling with diversified NFL Showdown lineups.
@@ -526,10 +741,23 @@ def run(
     Args:
         dkentries_csv: Optional explicit DKEntries CSV path. If None, the latest
             DKEntries*.csv under data/nfl/dkentries/ is used.
-        diversified_excel: Optional explicit path to a top1pct workbook. If
-            None, the latest .xlsx under outputs/nfl/top1pct/ is used.
+        diversified_excel: Optional explicit path to a diversified lineups
+            workbook. If None, the latest .xlsx under outputs/nfl/diversified/
+            is used.
         output_csv: Optional explicit output path. If None, a timestamped file
             under outputs/nfl/dkentries/ is created.
+        cpt_own_weight: Weight on CPT dollar-exposure matching vs lineup
+            strength. Higher values push CPT dollar exposure closer to
+            projected field CPT ownership.
+        flex_own_weight: Weight on FLEX exposure diversification penalty.
+            Set > 0 to encourage FLEX dollar exposure to track projected
+            field FLEX ownership.
+        max_flex_overlap: Optional max number of shared FLEX players allowed
+            between any pair of assigned lineups. If None, no hard FLEX cap
+            is enforced during assignment.
+        lineups_excel: Optional explicit path to the lineups workbook whose
+            Projections sheet supplies projected field ownership. If None,
+            the latest .xlsx under outputs/nfl/lineups/ is used.
     """
     dkentries_path = dkentries_utils.resolve_latest_dkentries_csv(dkentries_csv)
     print(f"Using DKEntries template: {dkentries_path}")
@@ -561,9 +789,22 @@ def run(
 
     dk_df = pd.DataFrame(rows_padded, columns=columns)
     slot_cols = dkentries_core.get_lineup_slot_columns(dk_df)
-    name_role_to_id = dkentries_core.build_name_role_to_id_map(dk_df, flex_role_label="FLEX")
+    name_role_to_id = dkentries_core.build_name_role_to_id_map(
+        dk_df, flex_role_label="FLEX"
+    )
 
-    assignment = _assign_lineups_fee_aware(dk_df, records)
+    # Load projected field ownership targets for CPT and FLEX roles.
+    field_ownership_raw = _load_field_ownership_mapping(lineups_excel=lineups_excel)
+    field_ownership_map = _normalize_field_ownership_map(field_ownership_raw)
+
+    assignment = _assign_lineups_exposure_aware(
+        dk_df=dk_df,
+        records=records,
+        field_ownership_map=field_ownership_map,
+        cpt_own_weight=cpt_own_weight,
+        flex_own_weight=flex_own_weight,
+        max_flex_overlap=max_flex_overlap,
+    )
     filled_df = _apply_assignments_to_dkentries(
         dk_df=dk_df,
         slot_cols=slot_cols,
@@ -571,25 +812,22 @@ def run(
         name_role_to_id=name_role_to_id,
     )
 
-    outputs_root = config.OUTPUTS_DIR / "dkentries"
-    outputs_root.mkdir(parents=True, exist_ok=True)
-
-    # Determine timestamp directory for this run.
-    ts_str: Optional[str] = None
+    # Resolve output location.
     if output_csv is not None:
-        out_path_requested = Path(output_csv)
-        m = re.search(r"(\\d{8}_\\d{6})", out_path_requested.stem)
-        if m and out_path_requested.parent == outputs_root:
-            ts_str = m.group(1)
-
-    if ts_str is None:
+        # Honor an explicit output path (e.g. when called from run_full.sh with
+        # a per-run directory like outputs/nfl/runs/<timestamp>/).
+        output_path = Path(output_csv)
+        base_dir = output_path.parent
+        base_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # Default to a timestamped folder under outputs/nfl/dkentries/.
+        outputs_root = config.OUTPUTS_DIR / "dkentries"
+        outputs_root.mkdir(parents=True, exist_ok=True)
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    base_dir = outputs_root / ts_str
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
-    output_path = base_dir / "dkentries.csv"
+        base_dir = outputs_root / ts_str
+        base_dir.mkdir(parents=True, exist_ok=True)
+        # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
+        output_path = base_dir / "dkentries.csv"
     print(f"Writing filled DKEntries CSV to {output_path} ...")
     filled_df.to_csv(output_path, index=False)
     print("Done.")
@@ -599,11 +837,13 @@ def run(
     print(f"Writing diversified lineups CSV to {diversified_csv_path} ...")
     diversified_df.to_csv(diversified_csv_path, index=False)
 
-    # Write ownership summary sidecar CSV.
+    # Write ownership summary sidecar CSV using the same field-ownership map
+    # that drove CPT/FLEX-aware assignment.
     _write_ownership_summary_csv(
         filled_df=filled_df,
         slot_cols=slot_cols,
         base_dir=base_dir,
+        field_ownership_map=field_ownership_map,
     )
 
     return output_path
@@ -630,9 +870,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Optional explicit path to a top1pct workbook containing "
-            f"'{LINEUPS_DIVERSIFIED_SHEET}' sheet. If omitted, the latest "
-            ".xlsx under outputs/nfl/top1pct/ is used."
+            "Optional explicit path to a diversified lineups workbook "
+            f"containing '{LINEUPS_DIVERSIFIED_SHEET}' sheet. If omitted, the "
+            "latest .xlsx under outputs/nfl/diversified/ is used."
         ),
     )
     parser.add_argument(
@@ -644,6 +884,46 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "is written under outputs/nfl/dkentries/."
         ),
     )
+    parser.add_argument(
+        "--cpt-own-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Weight on CPT dollar-exposure matching vs lineup strength. Higher "
+            "values push CPT dollar exposure closer to projected field CPT "
+            "ownership."
+        ),
+    )
+    parser.add_argument(
+        "--flex-own-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight on FLEX exposure diversification penalty. Set > 0 to "
+            "encourage FLEX dollar exposure to track projected field FLEX "
+            "ownership."
+        ),
+    )
+    parser.add_argument(
+        "--max-flex-overlap",
+        type=int,
+        default=None,
+        help=(
+            "Optional hard cap on the number of shared FLEX players between "
+            "any pair of assigned lineups. If omitted, no hard FLEX overlap "
+            "cap is enforced during DKEntries assignment."
+        ),
+    )
+    parser.add_argument(
+        "--lineups-excel",
+        type=str,
+        default=None,
+        help=(
+            "Optional explicit path to a lineups workbook whose Projections "
+            "sheet provides projected field ownership for CPT and FLEX roles. "
+            "If omitted, the latest .xlsx under outputs/nfl/lineups/ is used."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -653,6 +933,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         dkentries_csv=args.dkentries_csv,
         diversified_excel=args.diversified_excel,
         output_csv=args.output_csv,
+        cpt_own_weight=args.cpt_own_weight,
+        flex_own_weight=args.flex_own_weight,
+        max_flex_overlap=args.max_flex_overlap,
+        lineups_excel=args.lineups_excel,
     )
 
 

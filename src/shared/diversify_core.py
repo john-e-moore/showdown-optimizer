@@ -79,11 +79,26 @@ def _build_player_set(row: pd.Series) -> FrozenSet[str]:
     return frozenset(names)
 
 
+def _build_flex_set(row: pd.Series) -> FrozenSet[str]:
+    """
+    Build a frozenset of FLEX-only player names for a lineup row.
+    """
+    cols = [f"flex{j}" for j in range(1, 6)]
+    names: List[str] = []
+    for col in cols:
+        if col not in row:
+            raise KeyError(f"Expected column '{col}' in Lineups_Top1Pct sheet.")
+        names.append(_parse_player_name(row[col]))
+    return frozenset(names)
+
+
 def _greedy_diversified_selection(
     df: pd.DataFrame,
     num_lineups: int,
     max_overlap: int,
     min_top1_pct: float,
+    max_flex_overlap: int | None = None,
+    cpt_max_share: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     """
     Greedily select up to num_lineups diversified lineups.
@@ -92,8 +107,11 @@ def _greedy_diversified_selection(
       1. Filter to lineups with top1_pct_finish_rate >= min_top1_pct.
       2. Sort remaining lineups by top1_pct_finish_rate desc, then by
          lineup_projection desc as a tie-breaker when available.
-      3. Iterate in sorted order, accepting a lineup if its overlap (number of
-         shared players) with every already-selected lineup is <= max_overlap.
+      3. Iterate in sorted order, accepting a lineup if:
+           - total overlap (CPT + FLEX) with every already-selected lineup is
+             <= max_overlap; and
+           - when max_flex_overlap is not None, FLEX-only overlap with every
+             already-selected lineup is <= max_flex_overlap.
     """
     if "top1_pct_finish_rate" not in df.columns:
         raise KeyError(
@@ -108,6 +126,7 @@ def _greedy_diversified_selection(
     # Build player sets for diversification.
     candidates = candidates.copy()
     candidates["_player_set"] = candidates.apply(_build_player_set, axis=1)
+    candidates["_flex_set"] = candidates.apply(_build_flex_set, axis=1)
 
     sort_cols: List[str] = ["top1_pct_finish_rate"]
     ascending: List[bool] = [False]
@@ -119,27 +138,53 @@ def _greedy_diversified_selection(
 
     selected_rows: List[Dict[str, object]] = []
     selected_sets: List[FrozenSet[str]] = []
+    selected_flex_sets: List[FrozenSet[str]] = []
+    # Track CPT counts to optionally enforce per-player CPT share caps.
+    cpt_counts: Dict[str, int] = {}
+    selected_count = 0
 
     for _, row in candidates.iterrows():
+        # Parse CPT name for this candidate lineup.
+        cpt_name = _parse_player_name(row["cpt"])
         player_set: FrozenSet[str] = row["_player_set"]
+        flex_set: FrozenSet[str] = row["_flex_set"]
         # Enforce max_overlap constraint against all previously selected lineups.
         if any(len(player_set & s) > max_overlap for s in selected_sets):
             continue
 
+        # Optionally enforce a FLEX-only overlap constraint.
+        if max_flex_overlap is not None:
+            if any(len(flex_set & s) > max_flex_overlap for s in selected_flex_sets):
+                continue
+
+        # Optionally enforce a CPT exposure cap relative to the *target* diversified
+        # set size (num_lineups), not just the number of lineups selected so far.
+        # This prevents early lineups from being rejected when max_share < 1.0
+        # simply because future_selected_count == 1.
+        if cpt_max_share is not None and num_lineups > 0:
+            current_cpt_count = cpt_counts.get(cpt_name, 0)
+            future_share = (current_cpt_count + 1) / num_lineups
+            max_share = cpt_max_share.get(cpt_name, 1.0)
+            if future_share > max_share:
+                continue
+
         selected_rows.append(row.to_dict())
         selected_sets.append(player_set)
+        selected_flex_sets.append(flex_set)
+        selected_count += 1
+        cpt_counts[cpt_name] = cpt_counts.get(cpt_name, 0) + 1
 
         if len(selected_rows) >= num_lineups:
             break
 
     if not selected_rows:
         # No diversified lineups could be selected under the constraints.
-        # Return an empty DataFrame with the original schema (sans helper column).
-        result = candidates.drop(columns=["_player_set"])
+        # Return an empty DataFrame with the original schema (sans helper columns).
+        result = candidates.drop(columns=["_player_set", "_flex_set"])
         return result.iloc[0:0]
 
     result_df = pd.DataFrame(selected_rows)
-    result_df = result_df.drop(columns=["_player_set"], errors="ignore")
+    result_df = result_df.drop(columns=["_player_set", "_flex_set"], errors="ignore")
     # Preserve column order from the original DataFrame where possible.
     cols_original = [c for c in df.columns if c in result_df.columns]
     extras = [c for c in result_df.columns if c not in cols_original]
@@ -214,6 +259,8 @@ def run_diversify(
     min_top1_pct: float = 1.0,
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
+    max_flex_overlap: int | None = None,
+    cpt_max_share: dict[str, float] | None = None,
 ) -> Path:
     """
     Execute diversification over top1pct lineups for a given sport.
@@ -225,6 +272,8 @@ def run_diversify(
         min_top1_pct: Minimum top1_pct_finish_rate (in percent) to keep.
         max_overlap: Maximum overlap allowed between any pair of lineups.
         top1pct_excel: Optional explicit path to a top1pct workbook.
+        max_flex_overlap: Optional maximum FLEX-only overlap allowed between
+            any pair of selected lineups. If None, only total overlap is used.
 
     Returns:
         Path to the written diversified lineups Excel workbook.
@@ -237,6 +286,11 @@ def run_diversify(
         f"{num_lineups} lineups with "
         f"top1_pct_finish_rate >= {min_top1_pct:.2f}% "
         f"and max_overlap <= {max_overlap}"
+        + (
+            f" and max_flex_overlap <= {max_flex_overlap}"
+            if max_flex_overlap is not None
+            else ""
+        )
     )
 
     selected_df = _greedy_diversified_selection(
@@ -244,16 +298,20 @@ def run_diversify(
         num_lineups=num_lineups,
         max_overlap=max_overlap,
         min_top1_pct=min_top1_pct,
+        max_flex_overlap=max_flex_overlap,
+        cpt_max_share=cpt_max_share,
     )
 
     exposure_df = _compute_exposure(selected_df)
 
-    top1pct_dir = outputs_dir / "top1pct"
-    top1pct_dir.mkdir(parents=True, exist_ok=True)
+    # Write diversified lineups under a dedicated 'diversified' subdirectory so
+    # they do not collide with the raw top1pct workbooks.
+    diversified_dir = outputs_dir / "diversified"
+    diversified_dir.mkdir(parents=True, exist_ok=True)
 
     # Include num_lineups in the filename; timestamp is already part of the
     # underlying top1pct workbook used for selection.
-    output_path = top1pct_dir / f"top1pct_diversified_{num_lineups}.xlsx"
+    output_path = diversified_dir / f"top1pct_diversified_{num_lineups}.xlsx"
 
     print(f"Writing {len(selected_df)} diversified lineups to {output_path}...")
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
