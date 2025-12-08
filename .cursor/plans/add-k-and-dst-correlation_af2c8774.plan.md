@@ -4,20 +4,20 @@ overview: Extend the NFL Showdown correlation pipeline to include kicker and DST
 todos:
   - id: include-dst-in-input
     content: Adjust NFL Sabersim projections loading so K and DST rows are preserved and flow into the correlation simulator, and confirm consistency with the optimizer’s Sabersim handling.
-    status: in_progress
+    status: completed
   - id: implement-k-simulation
     content: Extend the NFL correlation simulator to assign simulated DK points to kickers based on their Sabersim projections (and optionally team offense) so they have realistic means and variance.
-    status: pending
+    status: completed
     dependencies:
       - include-dst-in-input
   - id: implement-dst-simulation
     content: Extend the NFL correlation simulator to assign DST DK points per simulation as a noisy, negatively-related function of opponent offensive DK output, calibrated to match Sabersim projections on average.
-    status: pending
+    status: completed
     dependencies:
       - include-dst-in-input
   - id: validate-top1pct-integration
     content: Regenerate correlations for a test slate, run the full pipeline including top1% estimation, and validate that K and DST appear in the correlation matrix and downstream outputs with sensible diagnostics.
-    status: pending
+    status: completed
     dependencies:
       - implement-k-simulation
       - implement-dst-simulation

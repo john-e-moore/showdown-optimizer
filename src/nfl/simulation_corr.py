@@ -410,11 +410,27 @@ def simulate_corr_matrix_from_projections(
     kicker_indices = np.nonzero(kicker_mask)[0]
     dst_indices = np.nonzero(dst_mask)[0]
 
-    kicker_team = teams_for_players[kicker_indices] if kicker_indices.size > 0 else np.array([], dtype=str)
-    dst_team = teams_for_players[dst_indices] if dst_indices.size > 0 else np.array([], dtype=str)
+    kicker_team = (
+        teams_for_players[kicker_indices] if kicker_indices.size > 0 else np.array([], dtype=str)
+    )
+    dst_team = (
+        teams_for_players[dst_indices] if dst_indices.size > 0 else np.array([], dtype=str)
+    )
 
-    kicker_proj = dk_proj_all[kicker_indices] if kicker_indices.size > 0 else np.array([], dtype=float)
-    dst_proj = dk_proj_all[dst_indices] if dst_indices.size > 0 else np.array([], dtype=float)
+    kicker_proj = (
+        dk_proj_all[kicker_indices] if kicker_indices.size > 0 else np.array([], dtype=float)
+    )
+    dst_proj = (
+        dk_proj_all[dst_indices] if dst_indices.size > 0 else np.array([], dtype=float)
+    )
+
+    # Identify RB rows and map them per team so DST can react directly to
+    # opponent RB performance, not just total offense.
+    rb_mask = positions == "RB"
+    rb_indices = np.nonzero(rb_mask)[0]
+
+    team_rb_indices: Dict[str, np.ndarray] = {}
+    team_rb_proj_totals: Dict[str, float] = {}
 
     # Precompute team-level projected DK totals (from Sabersim) as a proxy for
     # expected offensive output. These are used to lightly tie kicker and DST
@@ -423,6 +439,14 @@ def simulate_corr_matrix_from_projections(
     for team_name, info in team_infos.items():
         idx = info["indices"]
         team_proj_totals[team_name] = float(dk_proj_all[idx].sum())
+
+        local_rb_mask = rb_mask[idx]
+        team_rb_idx = idx[local_rb_mask]
+        team_rb_indices[team_name] = team_rb_idx
+        if team_rb_idx.size > 0:
+            team_rb_proj_totals[team_name] = float(dk_proj_all[team_rb_idx].sum())
+        else:
+            team_rb_proj_totals[team_name] = 0.0
 
     n_players = len(players_df)
     if n_players == 0:
@@ -511,7 +535,8 @@ def simulate_corr_matrix_from_projections(
             sim_dk[kicker_indices] = kicker_samples
 
         # ------------------------------------------------------------------
-        # DST DK simulation as a noisy function of opponent offense
+        # DST DK simulation as a noisy function of opponent offense,
+        # with an extra term tied directly to opponent RB performance.
         # ------------------------------------------------------------------
         if dst_indices.size > 0:
             dst_samples = np.empty(dst_indices.shape[0], dtype=float)
@@ -520,21 +545,44 @@ def simulate_corr_matrix_from_projections(
                 team_name = dst_team[i]
                 base_mean = float(dst_proj[i])
 
-                # Opponent offense is the sum of simulated offensive DK for all
-                # other teams in the slate. For typical Showdown slates this is
-                # just the single opposing team.
+                # Opponent teams in this slate (typically a single team).
                 opp_teams = [t for t in teams if t != team_name]
+
+                # Total opponent offensive DK this sim.
                 opp_off = float(sum(team_offense_dk.get(t, 0.0) for t in opp_teams))
                 opp_proj = float(sum(team_proj_totals.get(t, 0.0) for t in opp_teams))
-
                 if opp_proj <= 0.0:
                     offense_term = 0.0
                 else:
                     offense_term = (opp_off - opp_proj) / max(opp_proj, 1.0)
 
-                # Higher opponent offensive DK => lower DST expectation.
+                # Opponent RB DK this sim (sum over all opp-team RBs).
+                opp_rb_indices_all: list[int] = []
+                for t in opp_teams:
+                    idx_rb = team_rb_indices.get(t)
+                    if idx_rb is not None and idx_rb.size > 0:
+                        opp_rb_indices_all.append(idx_rb)
+                if opp_rb_indices_all:
+                    opp_rb_indices_concat = np.concatenate(opp_rb_indices_all)
+                    opp_rb_dk = float(sim_dk[opp_rb_indices_concat].sum())
+                    opp_rb_proj = float(
+                        sum(team_rb_proj_totals.get(t, 0.0) for t in opp_teams)
+                    )
+                    if opp_rb_proj > 0.0:
+                        rb_term = (opp_rb_dk - opp_rb_proj) / max(opp_rb_proj, 1.0)
+                    else:
+                        rb_term = 0.0
+                else:
+                    rb_term = 0.0
+
+                # Higher opponent offensive DK and higher opponent RB DK =>
+                # lower DST expectation. The RB-specific term strengthens
+                # negative correlation with opposing RBs beyond the generic
+                # offense effect.
                 mean = base_mean * (
-                    1.0 - config.SIM_DST_OPP_OFFENSE_COEFF * offense_term
+                    1.0
+                    - config.SIM_DST_OPP_OFFENSE_COEFF * offense_term
+                    - config.SIM_DST_OPP_RB_COEFF * rb_term
                 )
 
                 std = config.SIM_DST_STD_MULTIPLIER * max(abs(base_mean), 1.0)

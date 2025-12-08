@@ -41,7 +41,7 @@ if [[ "${#}" -lt 1 ]]; then
 fi
 
 SABERSIM_CSV="$1"
-FIELD_SIZE="${2:-1000}"
+FIELD_SIZE="${2:-500}"
 NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"

@@ -179,18 +179,21 @@ SIM_EPS: Final[float] = 1e-9
 #   - Mean centered on Sabersim projection, with a modest dependence on the
 #     simulated team offensive DK total.
 #   - Std dev scales with projection to give non-zero variance for all Ks.
-SIM_KICKER_STD_MULTIPLIER: Final[float] = 0.6
-SIM_KICKER_OFFENSE_COEFF: Final[float] = 0.25
+SIM_KICKER_STD_MULTIPLIER: Final[float] = 0.4
+SIM_KICKER_OFFENSE_COEFF: Final[float] = 0.5
 SIM_KICKER_MIN_DK: Final[float] = 0.0
 SIM_KICKER_MAX_DK: Final[float] = 25.0
 
 # DST DK simulation:
 #   - Mean centered on Sabersim projection, with a negative dependence on
-#     opponent offensive DK output.
+#     opponent offensive DK output and, optionally, opponent RB DK output.
 #   - Std dev scales with projection magnitude; values are clipped to keep
 #     outputs within a sane DraftKings range.
-SIM_DST_STD_MULTIPLIER: Final[float] = 0.9
-SIM_DST_OPP_OFFENSE_COEFF: Final[float] = 0.35
+SIM_DST_STD_MULTIPLIER: Final[float] = 0.6
+SIM_DST_OPP_OFFENSE_COEFF: Final[float] = 1.1
+# Extra lever to strengthen negative correlation to opposing RBs specifically.
+# Higher values => DST moves more aggressively opposite to opponent RB DK.
+SIM_DST_OPP_RB_COEFF: Final[float] = 0.7
 SIM_DST_MIN_DK: Final[float] = -5.0
 SIM_DST_MAX_DK: Final[float] = 25.0
 
