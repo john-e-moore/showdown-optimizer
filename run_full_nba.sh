@@ -38,7 +38,9 @@
 #     equal 20% weights for each pattern:
 #       '5|1=0.2,4|2=0.2,3|3=0.2,2|4=0.2,1|5=0.2'.
 #   - DIVERSIFIED_NUM is the number of diversified lineups to select from the
-#     top1pct output; it defaults to NUM_LINEUPS when omitted.
+#     top1pct output; by default it is resolved from the number of entries in
+#     the latest NBA DKEntries CSV (under data/nba/dkentries/) when not
+#     provided explicitly.
 #   - The script assumes it is run from the project root, or that Python can
 #     find the `src` package from the current directory.
 
@@ -59,7 +61,18 @@ NUM_LINEUPS="${4:-500}"
 SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
-DIVERSIFIED_NUM="${8:-${NUM_LINEUPS}}"
+
+# If an 8th argument is provided, treat it as an explicit override for the
+# number of diversified lineups to select. Otherwise, default to the number
+# of actual entries in the latest DKEntries*.csv under data/nba/dkentries/.
+DIVERSIFIED_NUM_CLI="${8-}"
+if [[ -n "${DIVERSIFIED_NUM_CLI}" ]]; then
+  DIVERSIFIED_NUM="${DIVERSIFIED_NUM_CLI}"
+else
+  echo "Resolving diversified lineup count from latest NBA DKEntries CSV..."
+  DIVERSIFIED_NUM="$(python -m src.nba.dkentries_utils --count-entries)"
+fi
+
 MAX_FLEX_OVERLAP="${9:-5}"
 CPT_FIELD_CAP_MULTIPLIER="${10:-1.5}"
 

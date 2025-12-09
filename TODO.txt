@@ -4,5 +4,5 @@
  - I should extend DK-contests to store contest results and payouts; Is there an API endpoint for finished contests?
  - Structure: date/{sport}/{slate}/{contest_id}/
  - Contents: draftables, payouts, results
-- Get higher sabersim plan for non-flagship ownership in showdown
+? Get higher sabersim plan for non-flagship ownership in showdown
 - Add good logging; put both diagnostic output and logs inside logs/{timestamp}/
