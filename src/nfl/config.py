@@ -193,7 +193,7 @@ SIM_DST_STD_MULTIPLIER: Final[float] = 0.6
 SIM_DST_OPP_OFFENSE_COEFF: Final[float] = 1.1
 # Extra lever to strengthen negative correlation to opposing RBs specifically.
 # Higher values => DST moves more aggressively opposite to opponent RB DK.
-SIM_DST_OPP_RB_COEFF: Final[float] = 0.7
+SIM_DST_OPP_RB_COEFF: Final[float] = 0.2
 SIM_DST_MIN_DK: Final[float] = -5.0
 SIM_DST_MAX_DK: Final[float] = 25.0
 
