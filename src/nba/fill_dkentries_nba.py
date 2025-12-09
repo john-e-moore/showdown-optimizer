@@ -90,6 +90,79 @@ def _load_diversified_lineups(
     return workbook_path, df, records
 
 
+def load_field_ownership_mapping(
+    lineups_excel: Optional[str] = None,
+) -> Dict[str, Dict[str, object]]:
+    """
+    Load per-player team and projected field ownership from a lineups
+    workbook's Projections sheet (original SaberSim CSV).
+
+    Returns:
+        mapping: player_name -> {
+            "team": team_abbrev or "",
+            "field_own_cpt": projected CPT ownership (%),
+            "field_own_flex": projected FLEX/UTIL ownership (%),
+        }
+    """
+    outputs_dir = config.OUTPUTS_DIR
+    lineups_dir = outputs_dir / "lineups"
+    lineups_path = top1pct_core._resolve_latest_excel(lineups_dir, explicit=lineups_excel)
+
+    xls = pd.ExcelFile(lineups_path)
+    try:
+        sabersim_df = pd.read_excel(xls, sheet_name="Projections")
+    except ValueError as exc:
+        raise KeyError(
+            "Lineups workbook missing 'Projections' sheet: "
+            f"{lineups_path}"
+        ) from exc
+
+    required_cols = {"Name", "Team", "My Proj", "My Own"}
+    missing = required_cols.difference(sabersim_df.columns)
+    if missing:
+        raise KeyError(
+            "Projections sheet missing required columns "
+            f"{sorted(missing)}. Expected at least {sorted(required_cols)}."
+        )
+
+    def _to_pct(value: float) -> float:
+        # Interpret SaberSim 'My Own' as already in percentage units (e.g., 0.67%).
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    grouped = sabersim_df.groupby(["Name", "Team"])
+
+    mapping: Dict[str, Dict[str, object]] = {}
+
+    for (name, team), g in grouped:
+        if len(g) == 0:
+            continue
+        g_sorted = g.sort_values(by="My Proj", ascending=False)
+        cpt_row = g_sorted.iloc[0]
+        cpt_pct = _to_pct(cpt_row["My Own"])
+
+        if len(g_sorted) > 1:
+            flex_row = g_sorted.iloc[1]
+            flex_pct = _to_pct(flex_row["My Own"])
+        else:
+            flex_pct = 0.0
+
+        name_str = str(name).strip()
+        team_str = str(team).strip()
+
+        # Keep first occurrence per player name.
+        if name_str not in mapping:
+            mapping[name_str] = {
+                "team": team_str,
+                "field_own_cpt": cpt_pct,
+                "field_own_flex": flex_pct,
+            }
+
+    return mapping
+
+
 def _write_ownership_summary_csv(
     filled_df: pd.DataFrame,
     slot_cols: Sequence[int],
@@ -177,71 +250,8 @@ def _write_ownership_summary_csv(
 
         return exposure_local, num_entries, total_fees
 
-    def _load_field_ownership_mapping() -> Dict[str, Dict[str, object]]:
-        """
-        Load per-player team and projected field ownership from the latest
-        lineups workbook's Projections sheet (original SaberSim CSV).
-        """
-        outputs_dir = config.OUTPUTS_DIR
-        lineups_dir = outputs_dir / "lineups"
-        lineups_path = top1pct_core._resolve_latest_excel(lineups_dir, explicit=None)
-
-        xls = pd.ExcelFile(lineups_path)
-        try:
-            sabersim_df = pd.read_excel(xls, sheet_name="Projections")
-        except ValueError as exc:
-            raise KeyError(
-                "Lineups workbook missing 'Projections' sheet: "
-                f"{lineups_path}"
-            ) from exc
-
-        required_cols = {"Name", "Team", "My Proj", "My Own"}
-        missing = required_cols.difference(sabersim_df.columns)
-        if missing:
-            raise KeyError(
-                "Projections sheet missing required columns "
-                f"{sorted(missing)}. Expected at least {sorted(required_cols)}."
-            )
-
-        def _to_pct(value: float) -> float:
-            # Interpret SaberSim 'My Own' as already in percentage units (e.g., 0.67%).
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return 0.0
-
-        grouped = sabersim_df.groupby(["Name", "Team"])
-
-        mapping: Dict[str, Dict[str, object]] = {}
-
-        for (name, team), g in grouped:
-            if len(g) == 0:
-                continue
-            g_sorted = g.sort_values(by="My Proj", ascending=False)
-            cpt_row = g_sorted.iloc[0]
-            cpt_pct = _to_pct(cpt_row["My Own"])
-
-            if len(g_sorted) > 1:
-                flex_row = g_sorted.iloc[1]
-                flex_pct = _to_pct(flex_row["My Own"])
-            else:
-                flex_pct = 0.0
-
-            name_str = str(name).strip()
-            team_str = str(team).strip()
-
-            # Keep first occurrence per player name.
-            if name_str not in mapping:
-                mapping[name_str] = {
-                    "team": team_str,
-                    "field_own_cpt": cpt_pct,
-                    "field_own_flex": flex_pct,
-                }
-
-        return mapping
-
     exposure, _, _ = _compute_realized_exposure(filled_df, slot_cols)
-    ownership_map = _load_field_ownership_mapping()
+    ownership_map = load_field_ownership_mapping()
 
     rows: List[Dict[str, object]] = []
     for (player_name, role), metrics in exposure.items():

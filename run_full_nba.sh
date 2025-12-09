@@ -48,7 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 if [[ "${#}" -lt 2 ]]; then
-  echo "Usage: $0 PATH_TO_SABERSIM_CSV PATH_TO_CORR_EXCEL [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM]" >&2
+  echo "Usage: $0 PATH_TO_SABERSIM_CSV PATH_TO_CORR_EXCEL [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM] [MAX_FLEX_OVERLAP] [CPT_FIELD_CAP_MULTIPLIER]" >&2
   exit 1
 fi
 
@@ -60,6 +60,8 @@ SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
 DIVERSIFIED_NUM="${8:-${NUM_LINEUPS}}"
+MAX_FLEX_OVERLAP="${9:-4}"
+CPT_FIELD_CAP_MULTIPLIER="${10:-1.5}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
   echo "Error: Sabersim CSV not found at '${SABERSIM_CSV}'" >&2
@@ -71,10 +73,16 @@ if [[ ! -f "${CORR_EXCEL}" ]]; then
   exit 1
 fi
 
+timestamp="$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="outputs/nba/runs/${timestamp}"
+mkdir -p "${RUN_DIR}"
+LINEUPS_EXCEL="${RUN_DIR}/lineups_${timestamp}.xlsx"
+
 echo "================================================================"
 echo "Step 1/4: Generating ${NUM_LINEUPS} NBA Showdown lineups"
 echo "         from Sabersim CSV: ${SABERSIM_CSV}"
 echo "         salary cap: ${SALARY_CAP}"
+echo "         Run directory: ${RUN_DIR}"
 echo "================================================================"
 
 OPT_STACK_MODE=()
@@ -98,6 +106,7 @@ python -m src.nba.showdown_optimizer_main \
   --sabersim-glob "${SABERSIM_CSV}" \
   --num-lineups "${NUM_LINEUPS}" \
   --salary-cap "${SALARY_CAP}" \
+  --output-excel "${LINEUPS_EXCEL}" \
   "${OPT_STACK_MODE[@]}" \
   "${OPT_STACK_WEIGHTS[@]}"
 
@@ -106,13 +115,16 @@ echo "================================================================"
 echo "Step 2/4: Estimating top 1% finish probabilities (explicit field)"
 echo "         Field size: ${FIELD_SIZE}"
 echo "         Correlation workbook: ${CORR_EXCEL}"
+echo "         Lineups workbook: ${LINEUPS_EXCEL}"
 echo "================================================================"
 
 python -m src.nba.top1pct_finish_rate_nba \
   --field-size "${FIELD_SIZE}" \
+  --lineups-excel "${LINEUPS_EXCEL}" \
   --corr-excel "${CORR_EXCEL}" \
   --num-sims 100000 \
-  --field-model "explicit"
+  --field-model "explicit" \
+  --run-dir "${RUN_DIR}"
 
 echo
 echo "================================================================"
@@ -120,21 +132,30 @@ echo "Step 3/4: Selecting diversified lineups"
 echo "         Target diversified lineups: ${DIVERSIFIED_NUM}"
 echo "         Min top1% finish rate: 1.0%"
 echo "         Max player overlap: 4"
+echo "         Max FLEX/UTIL overlap: ${MAX_FLEX_OVERLAP}"
+echo "         CPT field cap multiplier: ${CPT_FIELD_CAP_MULTIPLIER}"
 echo "================================================================"
 
 python -m src.nba.diversify_lineups_nba \
   --num-lineups "${DIVERSIFIED_NUM}" \
   --min-top1-pct 1.0 \
-  --max-overlap 4
+  --max-overlap 4 \
+  --max-flex-overlap "${MAX_FLEX_OVERLAP}" \
+  --cpt-field-cap-multiplier "${CPT_FIELD_CAP_MULTIPLIER}" \
+  --lineups-excel "${LINEUPS_EXCEL}" \
+  --output-dir "${RUN_DIR}"
 
 echo
 echo "================================================================"
 echo "Step 4/4: Filling DKEntries CSV with diversified lineups"
 echo "         Using latest DKEntries template under data/nba/dkentries/"
-echo "         Writing DK-upload-ready CSV under outputs/nba/dkentries/"
+echo "         Writing DK-upload-ready CSV under ${RUN_DIR}/"
 echo "================================================================"
 
-python -m src.nba.fill_dkentries_nba
+OUTPUT_DKENTRIES_CSV="${RUN_DIR}/dkentries_${timestamp}.csv"
+
+python -m src.nba.fill_dkentries_nba \
+  --output-csv "${OUTPUT_DKENTRIES_CSV}"
 
 echo
 echo "All NBA steps completed."

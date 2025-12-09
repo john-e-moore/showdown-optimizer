@@ -412,23 +412,39 @@ python -m src.nba.top1pct_finish_rate_nba \
 
 Select a diversified subset of NBA Showdown lineups based on top1% and overlap.
 
-- **Example:**
+– **Example:**
 
 ```bash
 python -m src.nba.diversify_lineups_nba \
   --num-lineups 150 \
   --min-top1-pct 1.0 \
-  --max-overlap 4
+  --max-overlap 4 \
+  --max-flex-overlap 4 \
+  --cpt-field-cap-multiplier 1.5
 ```
 
-- **Flags:**
+– **Flags:**
   - **`--num-lineups`** (required): Number of lineups to select.
   - **`--min-top1-pct`**: Minimum `top1_pct_finish_rate` in percent.
     - Default: `1.0`.
   - **`--max-overlap`**: Maximum overlapping players allowed (0–6).
     - Default: `4`.
+  - **`--max-flex-overlap`**: Optional maximum overlapping FLEX/UTIL players allowed
+    between any pair of selected lineups (0–5). If omitted, only total overlap
+    (`--max-overlap`) is enforced.
+  - **`--cpt-field-cap-multiplier`**: Multiple of projected field CPT ownership
+    used as a max CPT share cap within the diversified set. Set `<= 0` to
+    disable CPT caps.
+    - Default: `2.0`.
   - **`--top1pct-excel`**: NBA top1% workbook under `outputs/nba/top1pct/`.
-    - Default: most recent `.xlsx` in that directory.
+    - Default: most recent `.xlsx` in that directory, or a run-scoped workbook
+      under `--output-dir` when provided.
+  - **`--lineups-excel`**: Optional lineups workbook whose Projections sheet
+    provides projected field ownership. If omitted, a run-scoped `lineups_*.xlsx`
+    under the output run directory is preferred when available; otherwise, the
+    latest `.xlsx` under `outputs/nba/lineups/` is used.
+  - **`--output-dir`**: Optional directory in which to write `diversified.csv`
+    and `ownership.csv` sidecar files for this diversification run.
 
 - **Output:**
   - Writes a diversified lineups workbook under `outputs/nba/top1pct/`.
