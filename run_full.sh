@@ -41,7 +41,7 @@ if [[ "${#}" -lt 1 ]]; then
 fi
 
 SABERSIM_CSV="$1"
-FIELD_SIZE="${2:-1000}"
+FIELD_SIZE="${2:-500}"
 NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
@@ -134,10 +134,10 @@ echo "================================================================"
 
 python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 0.25 \
+  --min-top1-pct 1.0 \
   --max-overlap 5 \
   --max-flex-overlap 5 \
-  --cpt-field-cap-multiplier 2.0 \
+  --cpt-field-cap-multiplier 1.5 \
   --lineups-excel "${LINEUPS_EXCEL}" \
   --output-dir "${RUN_DIR}"
 

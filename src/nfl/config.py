@@ -74,7 +74,8 @@ TRAIN_SEASONS: Final[range] = range(2023, 2024)  # 2023
 VAL_SEASONS: Final[range] = range(2024, 2025)    # 2024
 TEST_SEASONS: Final[range] = range(2024, 2025)   # 2024 (reuse for test)
 
-# Offensive positions to include downstream (plus optional K)
+# Offensive positions to include downstream (plus K and DST so they are present
+# in the correlation matrix and top1% pipelines).
 OFFENSIVE_POSITIONS: Final[List[str]] = ["QB", "RB", "WR", "TE", "K", "DST"]
 
 
@@ -168,6 +169,33 @@ SIM_DIRICHLET_K_TDS: Final[float] = 20.0
 # Small epsilon used when guarding against division by zero in share
 # computations.
 SIM_EPS: Final[float] = 1e-9
+
+
+# -----------------------------------------------------------------------------
+# Kicker / DST simulation tuning knobs
+# -----------------------------------------------------------------------------
+
+# Kicker DK simulation:
+#   - Mean centered on Sabersim projection, with a modest dependence on the
+#     simulated team offensive DK total.
+#   - Std dev scales with projection to give non-zero variance for all Ks.
+SIM_KICKER_STD_MULTIPLIER: Final[float] = 0.4
+SIM_KICKER_OFFENSE_COEFF: Final[float] = 0.5
+SIM_KICKER_MIN_DK: Final[float] = 0.0
+SIM_KICKER_MAX_DK: Final[float] = 25.0
+
+# DST DK simulation:
+#   - Mean centered on Sabersim projection, with a negative dependence on
+#     opponent offensive DK output and, optionally, opponent RB DK output.
+#   - Std dev scales with projection magnitude; values are clipped to keep
+#     outputs within a sane DraftKings range.
+SIM_DST_STD_MULTIPLIER: Final[float] = 0.6
+SIM_DST_OPP_OFFENSE_COEFF: Final[float] = 1.1
+# Extra lever to strengthen negative correlation to opposing RBs specifically.
+# Higher values => DST moves more aggressively opposite to opponent RB DK.
+SIM_DST_OPP_RB_COEFF: Final[float] = 0.2
+SIM_DST_MIN_DK: Final[float] = -5.0
+SIM_DST_MAX_DK: Final[float] = 25.0
 
 
 def ensure_directories() -> None:

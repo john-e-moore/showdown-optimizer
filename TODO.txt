@@ -1,15 +1,5 @@
-x Post-contest sim; see if my stuff matches Sabersim's
- x Add 'Projections' tab (make it the first tab) with the original sabersim projections
- x Add 'Sum Ownership' and 'Salary-weighted Ownership' to 'Simulation' tab
- x Add 'Entries' column into 2nd column of 'Entrant summary' tab - the number of entries that entrant put into the contest
- x In 'Player summary' tab, add 'CPT proj ownership' and 'FLEX proj ownership' next to 'CPT draft %' and 'FLEX draft %'; these are the projected ownerships from the sabersim projections.
-- Update dkcontests job to download contest payouts
- - Don't change draftables filenames
- - Use {contest_id}_payouts.json for payouts file
-- Read DKEntries, download contest, draftables, and payout info from S3, and output filled DKEntries.
- - Diversify across dollar amount while still using best lineups in highest buyins; how?
-- Add ROI to contest flashback using payouts json
-- Extend same method to NBA
+- NBA - figure out correlation scraping then start playing.
+- Generate more lineups - explore why just 2000 takes so long but generating field lineups is super fast.
 - Data storage on S3
  - I should extend DK-contests to store contest results and payouts; Is there an API endpoint for finished contests?
  - Structure: date/{sport}/{slate}/{contest_id}/
