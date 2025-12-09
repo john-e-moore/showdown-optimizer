@@ -37,10 +37,10 @@ def _load_diversified_lineups(
     diversified_excel: Optional[str] = None,
 ) -> Tuple[Path, pd.DataFrame, List[LineupRecord]]:
     """
-    Load diversified lineups from the latest (or specified) top1pct workbook.
+    Load diversified lineups from the latest (or specified) diversified workbook.
     """
-    top1pct_dir = config.OUTPUTS_DIR / "top1pct"
-    workbook_path = top1pct_core._resolve_latest_excel(top1pct_dir, diversified_excel)
+    diversified_dir = config.OUTPUTS_DIR / "diversified"
+    workbook_path = top1pct_core._resolve_latest_excel(diversified_dir, diversified_excel)
 
     xls = pd.ExcelFile(workbook_path)
     try:
@@ -353,25 +353,21 @@ def run(
         flex_role_label="UTIL",
     )
 
-    outputs_root = config.OUTPUTS_DIR / "dkentries"
-    outputs_root.mkdir(parents=True, exist_ok=True)
-
-    # Determine timestamp directory for this run.
-    ts_str: Optional[str] = None
+    # Resolve output location.
     if output_csv is not None:
-        out_path_requested = Path(output_csv)
-        m = re.search(r"(\d{8}_\d{6})", out_path_requested.stem)
-        if m and out_path_requested.parent == outputs_root:
-            ts_str = m.group(1)
-
-    if ts_str is None:
+        # Honor an explicit output path (e.g., when called from a per-run script).
+        output_path = Path(output_csv)
+        base_dir = output_path.parent
+        base_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # Default to a timestamped folder under outputs/nba/dkentries/.
+        outputs_root = config.OUTPUTS_DIR / "dkentries"
+        outputs_root.mkdir(parents=True, exist_ok=True)
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    base_dir = outputs_root / ts_str
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
-    output_path = base_dir / "dkentries.csv"
+        base_dir = outputs_root / ts_str
+        base_dir.mkdir(parents=True, exist_ok=True)
+        # Write filled DKEntries CSV as dkentries.csv inside the timestamped folder.
+        output_path = base_dir / "dkentries.csv"
     print(f"Writing filled DKEntries CSV to {output_path} ...")
     filled_df.to_csv(output_path, index=False)
     print("Done.")
@@ -412,9 +408,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Optional explicit path to a top1pct workbook containing "
+            "Optional explicit path to a diversified lineups workbook containing "
             f"'{LINEUPS_DIVERSIFIED_SHEET}' sheet. If omitted, the latest "
-            ".xlsx under outputs/nba/top1pct/ is used."
+            ".xlsx under outputs/nba/diversified/ is used."
         ),
     )
     parser.add_argument(
