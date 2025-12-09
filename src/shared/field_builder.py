@@ -170,6 +170,28 @@ def _build_projection_universe(
             "Correlation Sabersim projections sheet missing 'Name' or 'My Proj'."
         )
     sabersim["Name"] = sabersim["Name"].astype(str)
+
+    # Handle duplicate Name entries (e.g. CPT vs non-CPT rows from a raw
+    # Sabersim Showdown export). For the field builder we also want a single
+    # flex-style row per player, so we keep the lower-projection row and drop
+    # the higher-projection CPT rows.
+    if sabersim["Name"].duplicated().any():
+        before = len(sabersim)
+        sabersim = (
+            sabersim.sort_values(by=["Name", "My Proj"], ascending=[True, True])
+            .groupby("Name", as_index=False)
+            .first()
+        )
+        after = len(sabersim)
+        dropped = before - after
+        if dropped > 0:
+            print(
+                "Warning: Sabersim_Projections sheet contained duplicate player "
+                "names for field builder; dropped "
+                f"{dropped} higher-projection CPT rows, keeping one flex-style "
+                "row per player."
+            )
+
     sab_idx = sabersim.set_index("Name")
 
     lineups_proj = lineups_proj_df.copy()

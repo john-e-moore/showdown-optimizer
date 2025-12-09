@@ -51,7 +51,11 @@ def _load_diversified_lineups(
             f"{workbook_path}"
         ) from exc
 
-    required_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
+    # Resolve non-CPT slot columns in a FLEX/UTIL-agnostic way so this works
+    # for both NFL-style (flex1–flex5) and NBA-style (util1–util5) diversified
+    # workbooks.
+    non_cpt_cols = top1pct_core._resolve_non_cpt_slot_columns(df)
+    required_cols = ["cpt"] + non_cpt_cols
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise KeyError(
@@ -68,8 +72,8 @@ def _load_diversified_lineups(
     for idx, row in df.iterrows():
         names: List[str] = []
         names.append(top1pct_core._parse_player_name(row["cpt"]))
-        for j in range(1, 6):
-            names.append(top1pct_core._parse_player_name(row[f"flex{j}"]))
+        for col in non_cpt_cols:
+            names.append(top1pct_core._parse_player_name(row[col]))
 
         base_strength = float(row["top1_pct_finish_rate"]) if has_top1 else 0.0
         proj_component = (

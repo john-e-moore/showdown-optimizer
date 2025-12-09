@@ -16,6 +16,30 @@ import pandas as pd
 LINEUPS_TOP1PCT_SHEET_NAME = "Lineups_Top1Pct"
 
 
+def _resolve_non_cpt_slot_columns(df: pd.DataFrame) -> List[str]:
+    """
+    Resolve non-CPT slot column names for a Showdown lineup DataFrame.
+
+    Supports both legacy FLEX-style naming (flex1–flex5) and UTIL-style naming
+    (util1–util5, used by NBA).
+    """
+    flex_cols = [f"flex{j}" for j in range(1, 6)]
+    util_cols = [f"util{j}" for j in range(1, 6)]
+
+    flex_missing = [c for c in flex_cols if c not in df.columns]
+    util_missing = [c for c in util_cols if c not in df.columns]
+
+    if not flex_missing:
+        return flex_cols
+    if not util_missing:
+        return util_cols
+
+    raise KeyError(
+        "Lineups_Top1Pct sheet missing expected non-CPT slot columns. "
+        f"Expected either FLEX-style {flex_cols} or UTIL-style {util_cols}."
+    )
+
+
 def _resolve_latest_excel(directory: Path, explicit: str | None) -> Path:
     """
     Resolve an Excel file path, preferring an explicit argument when provided.
@@ -66,26 +90,27 @@ def _load_top1pct_lineups(
     return workbook_path, lineups_df
 
 
-def _build_player_set(row: pd.Series) -> FrozenSet[str]:
+def _build_player_set(row: pd.Series, non_cpt_cols: List[str]) -> FrozenSet[str]:
     """
-    Build a frozenset of player names for a lineup row (CPT + 5 flex-style slots).
+    Build a frozenset of player names for a lineup row (CPT + 5 non-CPT slots).
     """
-    cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
     names: List[str] = []
-    for col in cols:
+    if "cpt" not in row:
+        raise KeyError("Expected column 'cpt' in Lineups_Top1Pct sheet.")
+    names.append(_parse_player_name(row["cpt"]))
+    for col in non_cpt_cols:
         if col not in row:
             raise KeyError(f"Expected column '{col}' in Lineups_Top1Pct sheet.")
         names.append(_parse_player_name(row[col]))
     return frozenset(names)
 
 
-def _build_flex_set(row: pd.Series) -> FrozenSet[str]:
+def _build_flex_set(row: pd.Series, non_cpt_cols: List[str]) -> FrozenSet[str]:
     """
-    Build a frozenset of FLEX-only player names for a lineup row.
+    Build a frozenset of non-CPT player names for a lineup row.
     """
-    cols = [f"flex{j}" for j in range(1, 6)]
     names: List[str] = []
-    for col in cols:
+    for col in non_cpt_cols:
         if col not in row:
             raise KeyError(f"Expected column '{col}' in Lineups_Top1Pct sheet.")
         names.append(_parse_player_name(row[col]))
@@ -125,8 +150,13 @@ def _greedy_diversified_selection(
 
     # Build player sets for diversification.
     candidates = candidates.copy()
-    candidates["_player_set"] = candidates.apply(_build_player_set, axis=1)
-    candidates["_flex_set"] = candidates.apply(_build_flex_set, axis=1)
+    non_cpt_cols = _resolve_non_cpt_slot_columns(candidates)
+    candidates["_player_set"] = candidates.apply(
+        lambda r: _build_player_set(r, non_cpt_cols), axis=1
+    )
+    candidates["_flex_set"] = candidates.apply(
+        lambda r: _build_flex_set(r, non_cpt_cols), axis=1
+    )
 
     sort_cols: List[str] = ["top1_pct_finish_rate"]
     ascending: List[bool] = [False]
@@ -206,7 +236,8 @@ def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
             columns=["player", "cpt_exposure", "flex_exposure", "total_exposure"]
         )
 
-    required_cols = ["cpt"] + [f"flex{j}" for j in range(1, 6)]
+    non_cpt_cols = _resolve_non_cpt_slot_columns(selected_df)
+    required_cols = ["cpt"] + non_cpt_cols
     missing = [c for c in required_cols if c not in selected_df.columns]
     if missing:
         raise KeyError(
@@ -225,8 +256,8 @@ def _compute_exposure(selected_df: pd.DataFrame) -> pd.DataFrame:
         cpt_name = _parse_player_name(row["cpt"])
         cpt_counts[cpt_name] += 1
 
-        # Flex-style slots
-        for col in [f"flex{j}" for j in range(1, 6)]:
+        # Flex/UTIL-style slots
+        for col in non_cpt_cols:
             flex_name = _parse_player_name(row[col])
             flex_counts[flex_name] += 1
 

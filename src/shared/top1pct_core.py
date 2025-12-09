@@ -238,6 +238,30 @@ def _build_player_universe(
             "Correlation Sabersim projections sheet missing 'My Proj' column."
         )
     sabersim_proj_df["Name"] = sabersim_proj_df["Name"].astype(str)
+
+    # Handle possible duplicate Name entries (e.g. CPT vs non-CPT rows from
+    # a raw Sabersim export). For our purposes we want a single flex-style
+    # row per player, so when duplicates exist we keep the *lower* projection
+    # row and drop the higher projection rows (which correspond to CPT rows
+    # in typical Sabersim Showdown outputs).
+    if sabersim_proj_df["Name"].duplicated().any():
+        before = len(sabersim_proj_df)
+        sabersim_proj_df = (
+            sabersim_proj_df.sort_values(
+                by=["Name", "My Proj"], ascending=[True, True]
+            )
+            .groupby("Name", as_index=False)
+            .first()
+        )
+        after = len(sabersim_proj_df)
+        dropped = before - after
+        if dropped > 0:
+            print(
+                "Warning: Sabersim_Projections sheet contained duplicate player "
+                f"names; dropped {dropped} higher-projection CPT rows, keeping "
+                "one flex-style row per player."
+            )
+
     corr_proj_indexed = sabersim_proj_df.set_index("Name")
 
     # Optional dk_std / Pos columns from correlation projections.
