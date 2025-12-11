@@ -56,12 +56,12 @@ fi
 
 SABERSIM_CSV="$1"
 CORR_EXCEL="$2"
-FIELD_SIZE="${3:-500}"
-NUM_LINEUPS="${4:-500}"
+FIELD_SIZE="${3:-9803}"
+NUM_LINEUPS="${4:-1000}"
 SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
-
+CHUNK_SIZE="${8:-50}"
 # If an 8th argument is provided, treat it as an explicit override for the
 # number of diversified lineups to select. Otherwise, default to the number
 # of actual entries in the latest DKEntries*.csv under data/nba/dkentries/.
@@ -120,6 +120,7 @@ python -m src.nba.showdown_optimizer_main \
   --num-lineups "${NUM_LINEUPS}" \
   --salary-cap "${SALARY_CAP}" \
   --output-excel "${LINEUPS_EXCEL}" \
+  --chunk-size "${CHUNK_SIZE}" \
   "${OPT_STACK_MODE[@]}" \
   "${OPT_STACK_WEIGHTS[@]}"
 
@@ -135,7 +136,7 @@ python -m src.nba.top1pct_finish_rate_nba \
   --field-size "${FIELD_SIZE}" \
   --lineups-excel "${LINEUPS_EXCEL}" \
   --corr-excel "${CORR_EXCEL}" \
-  --num-sims 100000 \
+  --num-sims 20000 \
   --field-model "explicit" \
   --run-dir "${RUN_DIR}"
 
@@ -151,7 +152,7 @@ echo "================================================================"
 
 python -m src.nba.diversify_lineups_nba \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 1.0 \
+  --min-top1-pct 0.01 \
   --max-overlap 5 \
   --max-flex-overlap "${MAX_FLEX_OVERLAP}" \
   --cpt-field-cap-multiplier "${CPT_FIELD_CAP_MULTIPLIER}" \

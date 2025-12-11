@@ -1,8 +1,8 @@
-- NBA - figure out correlation scraping then start playing.
 - Generate more lineups - explore why just 2000 takes so long but generating field lineups is super fast.
 - Data storage on S3
  - I should extend DK-contests to store contest results and payouts; Is there an API endpoint for finished contests?
  - Structure: date/{sport}/{slate}/{contest_id}/
  - Contents: draftables, payouts, results
+- Grab sabersim correlations for NFL as well.
 ? Get higher sabersim plan for non-flagship ownership in showdown
 - Add good logging; put both diagnostic output and logs inside logs/{timestamp}/
