@@ -78,6 +78,12 @@ SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
 
+# Default parallelization settings for multi-stack runs. These can be
+# overridden by exporting NUM_WORKERS or PARALLEL_MODE before invoking the
+# script, e.g. NUM_WORKERS=1 to force sequential behavior.
+NUM_WORKERS="${NUM_WORKERS:-5}"
+PARALLEL_MODE="${PARALLEL_MODE:-by_stack_pattern}"
+
 # If an 8th argument is provided, treat it as an explicit override for the
 # number of diversified lineups to select. Otherwise, default to the number
 # of actual entries in the latest DKEntries*.csv under data/nba/dkentries/.
@@ -134,8 +140,8 @@ fi
 
 OPT_PARALLEL=()
 if [[ "${STACK_MODE}" == "multi" ]]; then
-  NUM_WORKERS_ENV="${NUM_WORKERS:-1}"
-  PARALLEL_MODE_ENV="${PARALLEL_MODE:-by_stack_pattern}"
+  NUM_WORKERS_ENV="${NUM_WORKERS}"
+  PARALLEL_MODE_ENV="${PARALLEL_MODE}"
   if [[ "${NUM_WORKERS_ENV}" -gt 1 ]]; then
     OPT_PARALLEL=(--parallel-mode "${PARALLEL_MODE_ENV}" --num-workers "${NUM_WORKERS_ENV}")
     echo "Using parallel mode: ${PARALLEL_MODE_ENV} with ${NUM_WORKERS_ENV} workers"
