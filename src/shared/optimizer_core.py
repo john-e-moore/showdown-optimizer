@@ -416,6 +416,9 @@ def solve_single_lineup(
     player_pool: PlayerPool,
     salary_cap: int,
     constraint_builders: Optional[Sequence[ConstraintBuilder]] = None,
+    *,
+    max_seconds: Optional[float] = None,
+    rel_gap: Optional[float] = None,
 ) -> Optional[Lineup]:
     """
     Build and solve a single-lineup MILP, returning the optimal Lineup.
@@ -431,14 +434,26 @@ def solve_single_lineup(
 
     set_mean_projection_objective(prob, x, player_pool)
 
-    solver = pulp.PULP_CBC_CMD(msg=False)
+    solver_kwargs: Dict[str, object] = {"msg": False}
+    if use_warm_start:
+        solver_kwargs["warmStart"] = True
+    if max_seconds is not None:
+        solver_kwargs["maxSeconds"] = float(max_seconds)
+    if rel_gap is not None:
+        solver_kwargs["fracGap"] = float(rel_gap)
+    solver = pulp.PULP_CBC_CMD(**solver_kwargs)
     prob.solve(solver)
 
     status_str = pulp.LpStatus.get(prob.status, "Unknown")
-    if status_str != "Optimal":
+    if status_str not in {"Optimal", "Not Solved"}:
         return None
 
-    return _extract_lineup_from_solution(player_pool, x)
+    try:
+        return _extract_lineup_from_solution(player_pool, x)
+    except RuntimeError:
+        # If no valid lineup can be extracted (e.g., due to partial/infeasible
+        # solutions), treat this as unsolved.
+        return None
 
 
 def _build_showdown_model_with_constraints(
@@ -488,6 +503,9 @@ def optimize_showdown_lineups(
     constraint_builders: Optional[Sequence[ConstraintBuilder]] = None,
     chunk_size: Optional[int] = None,
     projection_eps: float = 1e-4,
+    use_warm_start: bool = False,
+    max_seconds: Optional[float] = None,
+    rel_gap: Optional[float] = None,
 ) -> List[Lineup]:
     """
     Generate up to num_lineups optimal lineups from a PlayerPool.
@@ -510,16 +528,27 @@ def optimize_showdown_lineups(
         )
         set_mean_projection_objective(prob, x, player_pool)
 
-        solver = pulp.PULP_CBC_CMD(msg=False)
+        solver_kwargs: Dict[str, object] = {"msg": False}
+        if use_warm_start:
+            solver_kwargs["warmStart"] = True
+        if max_seconds is not None:
+            solver_kwargs["maxSeconds"] = float(max_seconds)
+        if rel_gap is not None:
+            solver_kwargs["fracGap"] = float(rel_gap)
+
+        solver = pulp.PULP_CBC_CMD(**solver_kwargs)
         lineups: List[Lineup] = []
 
         for k in range(num_lineups):
             prob.solve(solver)
             status_str = pulp.LpStatus.get(prob.status, "Unknown")
-            if status_str != "Optimal":
+            if status_str not in {"Optimal", "Not Solved"}:
                 break
 
-            lineup = _extract_lineup_from_solution(player_pool, x)
+            try:
+                lineup = _extract_lineup_from_solution(player_pool, x)
+            except RuntimeError:
+                break
             lineups.append(lineup)
 
             # Add a no-duplicate constraint so that the next solution differs
@@ -536,7 +565,12 @@ def optimize_showdown_lineups(
 
     # Chunked behavior: repeatedly build fresh models with an upper bound on
     # allowed projection, and extract up to chunk_size unique lineups per model.
-    solver = pulp.PULP_CBC_CMD(msg=False)
+    solver_kwargs: Dict[str, object] = {"msg": False}
+    if max_seconds is not None:
+        solver_kwargs["maxSeconds"] = float(max_seconds)
+    if rel_gap is not None:
+        solver_kwargs["fracGap"] = float(rel_gap)
+    solver = pulp.PULP_CBC_CMD(**solver_kwargs)
     all_lineups: List[Lineup] = []
     remaining = num_lineups
     prev_min_proj: Optional[float] = None
@@ -563,11 +597,14 @@ def optimize_showdown_lineups(
         for j in range(current_chunk_size):
             prob.solve(solver)
             status_str = pulp.LpStatus.get(prob.status, "Unknown")
-            if status_str != "Optimal":
+            if status_str not in {"Optimal", "Not Solved"}:
                 # No more feasible/optimal solutions within this chunk.
                 break
 
-            lineup = _extract_lineup_from_solution(player_pool, x)
+            try:
+                lineup = _extract_lineup_from_solution(player_pool, x)
+            except RuntimeError:
+                break
             lineup_proj = lineup.projection()
             all_lineups.append(lineup)
             remaining -= 1

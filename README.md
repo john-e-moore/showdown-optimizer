@@ -366,11 +366,36 @@ python -m src.nba.showdown_optimizer_main \
   - **`--salary-cap`**: DraftKings Showdown salary cap.
     - Default: `50000`.
   - **`--chunk-size`**: Lineups solved per MILP chunk.
-    - Default: `50`; set `<= 0` to disable chunking.
+    - Default: `50`.
+    - Set `<= 0` to disable chunking and reuse a single growing model with
+      no-duplicate constraints across all lineups (often faster for large
+      runs when combined with CBC warm starts).
   - **`--stack-mode`**: Team stacking mode.
     - Choices: `"none"` (default), `"multi"`.
   - **`--stack-weights`**: Optional weights for multi-stack mode.
     - Same semantics as NFL optimizer.
+  - **`--num-workers`**: Number of worker threads used when parallelizing
+    multi-stack runs across stack patterns.
+    - Default: `1` (no parallelism).
+  - **`--parallel-mode`**: Parallelization strategy.
+    - Choices: `"none"` (default), `"by_stack_pattern"`.
+    - `"by_stack_pattern"` runs each stack pattern in its own worker when
+      `--stack-mode multi` and `--num-workers > 1`.
+  - **`--use-warm-start`**: Enable CBC warm starts in the single-model path
+    (`--chunk-size <= 0`), allowing the solver to reuse solution information
+    as additional lineups are generated.
+  - **`--solver-max-seconds`**: Optional per-solve time limit in seconds
+    passed through to CBC.
+  - **`--solver-rel-gap`**: Optional relative optimality gap for CBC
+    (e.g., `0.005` for 0.5% MIP gap); allows early termination once the
+    solver is “good enough” instead of fully optimal.
+
+- **Profiling:**
+  - Every optimizer run prints a machine-parsable summary line of the form:
+    - `OPT_TIME seconds=<float> num_lineups_requested=<int> num_lineups_generated=<int> stack_mode=<str> chunk_size=<int> parallel_mode=<str> num_workers=<int> [solver_max_seconds=... solver_rel_gap=...]`
+  - A sidecar JSON file `lineups_<timestamp>_metrics.json` is written next to
+    the lineups workbook with the same high-level metrics plus per-pattern
+    timings in multi-stack mode.
 
 - **Output:**
   - Writes an Excel workbook under `outputs/nba/lineups/lineups_<timestamp>.xlsx`.
@@ -407,6 +432,35 @@ python -m src.nba.top1pct_finish_rate_nba \
 
 - **Output:**
   - Writes a top1% workbook under `outputs/nba/top1pct/`.
+
+### NBA field-style augmentation – `src.nba.augment_lineups_with_field`
+
+Optionally augment an optimizer lineups workbook with additional
+quota-balanced field-style lineups before running top 1% scoring.
+
+- **Example:**
+
+```bash
+python -m src.nba.augment_lineups_with_field \
+  --lineups-excel outputs/nba/lineups/lineups_YYYYMMDD_HHMMSS.xlsx \
+  --corr-excel outputs/nba/correlations/showdown_corr_matrix.xlsx \
+  --extra-lineups 500
+```
+
+- **Flags:**
+  - **`--lineups-excel`** (required): Optimizer lineups workbook to augment.
+  - **`--corr-excel`** (required): Correlations workbook providing
+    `Sabersim_Projections` and `Correlation_Matrix` sheets.
+  - **`--extra-lineups`** (required): Number of additional field-style
+    CPT+UTIL lineups to generate and append.
+  - **`--output-excel`**: Optional explicit path for the augmented workbook.
+    - Default: sibling file with `_augmented` suffix next to the input file.
+  - **`--random-seed`**: Optional RNG seed for reproducibility.
+
+- **Output:**
+  - Writes an augmented lineups workbook whose `Lineups` sheet contains both
+    optimizer lineups and additional field-style lineups tagged via the
+    `target_stack_pattern` column (e.g., `"field"` for augmented entries).
 
 ### NBA lineup diversification – `src.nba.diversify_lineups_nba`
 

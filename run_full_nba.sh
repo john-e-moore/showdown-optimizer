@@ -41,6 +41,22 @@
 #     top1pct output; by default it is resolved from the number of entries in
 #     the latest NBA DKEntries CSV (under data/nba/dkentries/) when not
 #     provided explicitly.
+#   - Optional environment variables:
+#       * NUM_WORKERS: when >1 and STACK_MODE='multi', enable parallelization
+#         across stack patterns in the optimizer CLI.
+#       * PARALLEL_MODE: parallelization strategy passed through to the
+#         optimizer (defaults to 'by_stack_pattern' when NUM_WORKERS>1).
+#       * SOLVER_MAX_SECONDS: optional per-solve CBC time limit passed to the
+#         optimizer CLI.
+#       * SOLVER_REL_GAP: optional relative MIP gap (e.g., 0.005 for 0.5%)
+#         passed to the optimizer CLI.
+#       * USE_WARM_START: when set to 1, enable CBC warm starts in the
+#         optimizer's single-model path.
+#       * EXTRA_FIELD_LINEUPS: when >0, insert an augmentation step that adds
+#         this many quota-balanced field-style lineups to the optimizer
+#         workbook before running top1% scoring.
+#       * CHUNK_SIZE: optional override for the optimizer --chunk-size flag
+#         (defaults to 0 to reuse a single growing model as in prior runs).
 #   - The script assumes it is run from the project root, or that Python can
 #     find the `src` package from the current directory.
 
@@ -56,12 +72,12 @@ fi
 
 SABERSIM_CSV="$1"
 CORR_EXCEL="$2"
-FIELD_SIZE="${3:-9803}"
-NUM_LINEUPS="${4:-1000}"
+FIELD_SIZE="${3:-784}"
+NUM_LINEUPS="${4:-200}"
 SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
-CHUNK_SIZE="${8:-50}"
+
 # If an 8th argument is provided, treat it as an explicit override for the
 # number of diversified lineups to select. Otherwise, default to the number
 # of actual entries in the latest DKEntries*.csv under data/nba/dkentries/.
@@ -75,6 +91,7 @@ fi
 
 MAX_FLEX_OVERLAP="${9:-5}"
 CPT_FIELD_CAP_MULTIPLIER="${10:-1.5}"
+CHUNK_SIZE_ENV="${CHUNK_SIZE:-0}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
   echo "Error: Sabersim CSV not found at '${SABERSIM_CSV}'" >&2
@@ -115,14 +132,56 @@ else
   echo "Using stack mode: none (single optimization pass)"
 fi
 
+OPT_PARALLEL=()
+if [[ "${STACK_MODE}" == "multi" ]]; then
+  NUM_WORKERS_ENV="${NUM_WORKERS:-1}"
+  PARALLEL_MODE_ENV="${PARALLEL_MODE:-by_stack_pattern}"
+  if [[ "${NUM_WORKERS_ENV}" -gt 1 ]]; then
+    OPT_PARALLEL=(--parallel-mode "${PARALLEL_MODE_ENV}" --num-workers "${NUM_WORKERS_ENV}")
+    echo "Using parallel mode: ${PARALLEL_MODE_ENV} with ${NUM_WORKERS_ENV} workers"
+  fi
+fi
+
+SOLVER_OPTS=()
+if [[ -n "${SOLVER_MAX_SECONDS:-}" ]]; then
+  SOLVER_OPTS+=(--solver-max-seconds "${SOLVER_MAX_SECONDS}")
+fi
+if [[ -n "${SOLVER_REL_GAP:-}" ]]; then
+  SOLVER_OPTS+=(--solver-rel-gap "${SOLVER_REL_GAP}")
+fi
+if [[ "${USE_WARM_START:-0}" == "1" ]]; then
+  SOLVER_OPTS+=(--use-warm-start)
+fi
+
 python -m src.nba.showdown_optimizer_main \
   --sabersim-glob "${SABERSIM_CSV}" \
   --num-lineups "${NUM_LINEUPS}" \
   --salary-cap "${SALARY_CAP}" \
   --output-excel "${LINEUPS_EXCEL}" \
-  --chunk-size "${CHUNK_SIZE}" \
+  --chunk-size "${CHUNK_SIZE_ENV}" \
   "${OPT_STACK_MODE[@]}" \
-  "${OPT_STACK_WEIGHTS[@]}"
+  "${OPT_STACK_WEIGHTS[@]}" \
+  "${OPT_PARALLEL[@]}" \
+  "${SOLVER_OPTS[@]}"
+
+EXTRA_FIELD_LINEUPS_ENV="${EXTRA_FIELD_LINEUPS:-0}"
+if [[ "${EXTRA_FIELD_LINEUPS_ENV}" -gt 0 ]]; then
+  echo
+  echo "================================================================"
+  echo "Optional augmentation: adding ${EXTRA_FIELD_LINEUPS_ENV} field-style lineups"
+  echo "         Correlation workbook: ${CORR_EXCEL}"
+  echo "         Base lineups workbook: ${LINEUPS_EXCEL}"
+  echo "================================================================"
+
+  AUGMENTED_LINEUPS_EXCEL="${RUN_DIR}/lineups_${timestamp}_augmented.xlsx"
+  python -m src.nba.augment_lineups_with_field \
+    --lineups-excel "${LINEUPS_EXCEL}" \
+    --corr-excel "${CORR_EXCEL}" \
+    --extra-lineups "${EXTRA_FIELD_LINEUPS_ENV}" \
+    --output-excel "${AUGMENTED_LINEUPS_EXCEL}"
+
+  LINEUPS_EXCEL="${AUGMENTED_LINEUPS_EXCEL}"
+fi
 
 echo
 echo "================================================================"
