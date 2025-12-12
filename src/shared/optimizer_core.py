@@ -39,6 +39,9 @@ class Player:
     position: str
     dk_salary: int
     dk_proj: float
+    # Optional projected minutes (NBA uses Sabersim 'Min' column). Kept optional
+    # so NFL / other sports can omit it without schema changes.
+    proj_min: Optional[float] = None
     dk_std: Optional[float] = None
     is_cpt_eligible: bool = True
     is_flex_eligible: bool = True

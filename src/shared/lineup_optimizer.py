@@ -37,6 +37,7 @@ SABERSIM_TEAM_COL = "Team"
 SABERSIM_POS_COL = "Pos"
 SABERSIM_SALARY_COL = "Salary"
 SABERSIM_DK_PROJ_COL = "My Proj"
+SABERSIM_MIN_COL = "Min"
 SABERSIM_DK_STD_COL = "dk_std"
 SABERSIM_IS_CPT_ELIGIBLE_COL = "is_cpt_eligible"
 SABERSIM_IS_FLEX_ELIGIBLE_COL = "is_flex_eligible"
@@ -106,6 +107,12 @@ def load_players_from_sabersim(path: str | Path) -> PlayerPool:
         dk_salary = int(row[SABERSIM_SALARY_COL])
         dk_proj = float(row[SABERSIM_DK_PROJ_COL])
 
+        if SABERSIM_MIN_COL in df.columns:
+            val = row[SABERSIM_MIN_COL]
+            proj_min: Optional[float] = float(val) if pd.notna(val) else None
+        else:
+            proj_min = None
+
         if SABERSIM_DK_STD_COL in df.columns:
             val = row[SABERSIM_DK_STD_COL]
             dk_std: Optional[float] = float(val) if pd.notna(val) else None
@@ -130,6 +137,7 @@ def load_players_from_sabersim(path: str | Path) -> PlayerPool:
                 position=position,
                 dk_salary=dk_salary,
                 dk_proj=dk_proj,
+                proj_min=proj_min,
                 dk_std=dk_std,
                 is_cpt_eligible=is_cpt_eligible,
                 is_flex_eligible=is_flex_eligible,
