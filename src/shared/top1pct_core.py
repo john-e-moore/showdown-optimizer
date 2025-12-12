@@ -783,6 +783,8 @@ def run_top1pct(
         )
 
     field_lineups_with_meta: pd.DataFrame | None = None
+    field_lineups_df: pd.DataFrame | None = None
+    field_meta_payload: Dict[str, pd.DataFrame] | None = None
 
     if field_model == "mixture":
         print("Computing field 99th percentile thresholds from ownership (mixture model)...")
@@ -831,6 +833,53 @@ def run_top1pct(
             teams=teams,
             sport=sport_hint,
         )
+
+        # Build Field Meta payload (ownership + averages + stack distribution).
+        non_cpt_cols = _resolve_non_cpt_slot_columns(field_lineups_df)
+        cpt_series = field_lineups_df["cpt"].apply(_parse_player_name)
+        cpt_counts = (
+            cpt_series.value_counts()
+            .rename_axis("player")
+            .reset_index(name="count")
+        )
+        cpt_counts["pct_lineups"] = 100.0 * cpt_counts["count"] / float(len(field_lineups_df))
+
+        flex_series = pd.concat(
+            [field_lineups_df[c].apply(_parse_player_name) for c in non_cpt_cols],
+            ignore_index=True,
+        )
+        denom_flex = float(len(field_lineups_df) * len(non_cpt_cols)) if non_cpt_cols else 1.0
+        flex_counts = (
+            flex_series.value_counts()
+            .rename_axis("player")
+            .reset_index(name="count")
+        )
+        flex_counts["pct_slots"] = 100.0 * flex_counts["count"] / denom_flex
+
+        avg_proj = float(field_lineups_with_meta["lineup_projection"].mean())
+        avg_salary = float(field_lineups_with_meta["lineup_salary"].mean())
+        summary_df = pd.DataFrame(
+            [
+                {"key": "field_size", "value": int(len(field_lineups_df))},
+                {"key": "avg_lineup_projection", "value": avg_proj},
+                {"key": "avg_lineup_salary", "value": avg_salary},
+            ]
+        )
+
+        stack_series = field_lineups_with_meta["stack"].fillna("").astype(str)
+        stack_counts = (
+            stack_series.value_counts()
+            .rename_axis("stack")
+            .reset_index(name="count")
+        )
+        stack_counts["pct_lineups"] = 100.0 * stack_counts["count"] / float(len(field_lineups_df))
+
+        field_meta_payload = {
+            "summary": summary_df,
+            "cpt_ownership": cpt_counts,
+            "flex_ownership": flex_counts,
+            "stack_distribution": stack_counts,
+        }
     if thresholds.shape[0] != scores.shape[0]:
         raise ValueError("Thresholds array must have length equal to num_sims.")
 
@@ -886,6 +935,31 @@ def run_top1pct(
         if field_lineups_with_meta is not None:
             field_lineups_with_meta.to_excel(
                 writer, sheet_name="Field_Lineups", index=False
+            )
+        if field_meta_payload is not None:
+            sheet = "Field Meta"
+            # Create the sheet by writing the summary first.
+            field_meta_payload["summary"].to_excel(
+                writer, sheet_name=sheet, index=False, startrow=0
+            )
+            ws = writer.sheets[sheet]
+            row = len(field_meta_payload["summary"]) + 2
+
+            ws.write(row, 0, "CPT Ownership")
+            field_meta_payload["cpt_ownership"].to_excel(
+                writer, sheet_name=sheet, index=False, startrow=row + 1
+            )
+            row = row + 1 + len(field_meta_payload["cpt_ownership"]) + 2
+
+            ws.write(row, 0, "FLEX Ownership")
+            field_meta_payload["flex_ownership"].to_excel(
+                writer, sheet_name=sheet, index=False, startrow=row + 1
+            )
+            row = row + 1 + len(field_meta_payload["flex_ownership"]) + 2
+
+            ws.write(row, 0, "Stack Distribution")
+            field_meta_payload["stack_distribution"].to_excel(
+                writer, sheet_name=sheet, index=False, startrow=row + 1
             )
 
     print("Done.")

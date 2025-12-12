@@ -27,6 +27,115 @@ import pandas as pd
 LINEUP_COLS = ["cpt"] + [f"flex{i}" for i in range(1, 6)]
 
 
+def _lineup_salary(
+    *,
+    cpt: str,
+    flex_players: List[str],
+    salary_by_name: Dict[str, float],
+) -> float:
+    """Compute DraftKings Showdown salary with CPT 1.5× weighting."""
+    cpt_salary = 1.5 * float(salary_by_name.get(cpt, 0.0))
+    flex_salary = sum(float(salary_by_name.get(p, 0.0)) for p in flex_players)
+    return cpt_salary + flex_salary
+
+
+def _build_sorted_salary_index(
+    eligible_names: List[str],
+    salary_by_name: Dict[str, float],
+) -> tuple[List[tuple[float, str]], np.ndarray, Dict[str, int]]:
+    """Build a stable sorted salary list + prefix sums for fast k-sum queries."""
+    pairs = [(float(salary_by_name.get(n, 0.0)), str(n)) for n in eligible_names]
+    pairs.sort(key=lambda x: (x[0], x[1]))
+    sal_arr = np.array([p[0] for p in pairs], dtype=float)
+    prefix = np.concatenate(([0.0], np.cumsum(sal_arr)))
+    pos = {name: i for i, (_s, name) in enumerate(pairs)}
+    return pairs, prefix, pos
+
+
+def _sum_smallest_k_excluding(
+    *,
+    k: int,
+    pairs: List[tuple[float, str]],
+    prefix: np.ndarray,
+    pos: Dict[str, int],
+    exclude_name: str | None,
+) -> float:
+    if k <= 0:
+        return 0.0
+    n = len(pairs)
+    if n < k:
+        return float("inf")
+    if exclude_name is None:
+        return float(prefix[k])
+    idx = pos.get(exclude_name)
+    if idx is None:
+        return float(prefix[k])
+    # If excluded item falls outside the smallest-k window, smallest-k sum unchanged.
+    if idx >= k:
+        return float(prefix[k])
+    # Otherwise, take k+1 and subtract the excluded salary.
+    if n < k + 1:
+        return float("inf")
+    return float(prefix[k + 1] - pairs[idx][0])
+
+
+def _sum_largest_k_excluding(
+    *,
+    k: int,
+    pairs: List[tuple[float, str]],
+    prefix: np.ndarray,
+    pos: Dict[str, int],
+    exclude_name: str | None,
+) -> float:
+    if k <= 0:
+        return 0.0
+    n = len(pairs)
+    if n < k:
+        return float("-inf")
+    total = float(prefix[n])
+    if exclude_name is None:
+        return float(total - prefix[n - k])
+    idx = pos.get(exclude_name)
+    if idx is None:
+        return float(total - prefix[n - k])
+    start_last_k = n - k
+    # If excluded item not in last-k window, last-k sum unchanged.
+    if idx < start_last_k:
+        return float(total - prefix[start_last_k])
+    # Otherwise, take last k+1 and subtract excluded salary.
+    if n < k + 1:
+        return float("-inf")
+    sum_last_k_plus_1 = float(total - prefix[n - (k + 1)])
+    return float(sum_last_k_plus_1 - pairs[idx][0])
+
+
+def _salary_bounds_feasible(
+    *,
+    used_salary: float,
+    slots_left: int,
+    cfg: "FieldBuilderConfig",
+    pairs: List[tuple[float, str]],
+    prefix: np.ndarray,
+    pos: Dict[str, int],
+    exclude_name: str | None,
+) -> bool:
+    min_rem = _sum_smallest_k_excluding(
+        k=slots_left, pairs=pairs, prefix=prefix, pos=pos, exclude_name=exclude_name
+    )
+    if not np.isfinite(min_rem):
+        return False
+    if used_salary + min_rem > float(cfg.salary_cap):
+        return False
+    max_rem = _sum_largest_k_excluding(
+        k=slots_left, pairs=pairs, prefix=prefix, pos=pos, exclude_name=exclude_name
+    )
+    if not np.isfinite(max_rem):
+        return False
+    if used_salary + max_rem < float(cfg.min_salary):
+        return False
+    return True
+
+
 def _hamilton_rounding(proportions: np.ndarray, total_slots: int) -> np.ndarray:
     """Hamilton / largest-remainder rounding for integer quotas.
 
@@ -75,6 +184,12 @@ class FieldBuilderConfig:
     # DraftKings Showdown salary cap and minimum spend.
     salary_cap: int = 50_000
     min_salary: int = 46_000
+
+    # Retry behavior for lineup construction.
+    max_attempts_per_lineup: int = 200
+    relax_quotas_after_attempts: int = 20
+    # When relaxing quotas, reduce effective beta by this factor but never violate salary.
+    relaxed_beta_factor: float = 0.25
 
 
 def _compute_player_quantas(
@@ -324,18 +439,42 @@ def _sample_cpt(
     salary: Dict[str, float],
     pos: Dict[str, str],
     cfg: FieldBuilderConfig,
+    *,
+    relaxed_quotas: bool = False,
+    flex_salary_index: tuple[List[tuple[float, str]], np.ndarray, Dict[str, int]] | None = None,
 ) -> str:
     epsilon = 1e-6
     names: List[str] = []
     weights: List[float] = []
 
+    if flex_salary_index is None:
+        # Default to all players in universe as flex-eligible (excluding CPT later).
+        flex_names = [str(n) for n in universe]
+        flex_salary_index = _build_sorted_salary_index(flex_names, salary)
+    flex_pairs, flex_prefix, flex_pos = flex_salary_index
+
     for name in universe:
         quota_left = remaining_cpt.get(name, 0)
-        if quota_left <= 0:
+        if not relaxed_quotas and quota_left <= 0:
             continue
+        # Salary feasibility with 5 flex slots remaining (exclude CPT name).
+        used_salary = 1.5 * float(salary.get(name, 0.0))
+        if not _salary_bounds_feasible(
+            used_salary=used_salary,
+            slots_left=5,
+            cfg=cfg,
+            pairs=flex_pairs,
+            prefix=flex_prefix,
+            pos=flex_pos,
+            exclude_name=str(name),
+        ):
+            continue
+
+        beta_eff = float(cfg.beta) * (float(cfg.relaxed_beta_factor) if relaxed_quotas else 1.0)
+        quota_for_weight = max(float(quota_left), 0.0)
         v = _estimate_value(proj.get(name, 0.0) * 1.5, salary.get(name, 0.0) * 1.5)
         value_term = max(v, 0.0) ** cfg.alpha
-        quota_term = (quota_left + epsilon) ** cfg.beta
+        quota_term = (quota_for_weight + epsilon) ** beta_eff
         rule_term = _soft_cpt_rule(pos.get(name, ""))
         w = value_term * quota_term * (rule_term ** cfg.gamma)
         if w <= 0:
@@ -363,6 +502,8 @@ def _sample_flex_sequence(
     corr_lookup: Dict[Tuple[str, str], float],
     cfg: FieldBuilderConfig,
     current_lineup: List[str],
+    *,
+    relaxed_quotas: bool = False,
 ) -> List[str]:
     """Fill the 5 FLEX slots sequentially for a single lineup.
 
@@ -380,6 +521,18 @@ def _sample_flex_sequence(
         return total
 
     for _slot in range(5):
+        # Build eligible pool for this slot and precompute salary index for fast bounds.
+        selected = set(current_lineup) | set(flex_players)
+        eligible_names: List[str] = []
+        for n in universe:
+            name = str(n)
+            if name in selected:
+                continue
+            if not relaxed_quotas and remaining_flex.get(name, 0) <= 0:
+                continue
+            eligible_names.append(name)
+        pairs, prefix, pos_map = _build_sorted_salary_index(eligible_names, salary)
+
         names: List[str] = []
         weights: List[float] = []
 
@@ -387,12 +540,39 @@ def _sample_flex_sequence(
             if name in current_lineup or name in flex_players:
                 continue
             quota_left = remaining_flex.get(name, 0)
-            if quota_left <= 0:
+            if not relaxed_quotas and quota_left <= 0:
                 continue
 
+            used_salary = _lineup_salary(
+                cpt=current_lineup[0], flex_players=flex_players, salary_by_name=salary
+            )
+            cand_salary = float(salary.get(name, 0.0))
+            if used_salary + cand_salary > float(cfg.salary_cap):
+                continue
+            slots_left_after = 5 - (len(flex_players) + 1)
+            if slots_left_after > 0:
+                # Feasible bounds after selecting candidate (exclude candidate from remaining pool).
+                if not _salary_bounds_feasible(
+                    used_salary=used_salary + cand_salary,
+                    slots_left=slots_left_after,
+                    cfg=cfg,
+                    pairs=pairs,
+                    prefix=prefix,
+                    pos=pos_map,
+                    exclude_name=str(name),
+                ):
+                    continue
+            else:
+                # Final slot: ensure we also meet min salary.
+                total_after = used_salary + cand_salary
+                if total_after < float(cfg.min_salary):
+                    continue
+
+            beta_eff = float(cfg.beta) * (float(cfg.relaxed_beta_factor) if relaxed_quotas else 1.0)
+            quota_for_weight = max(float(quota_left), 0.0)
             v = _estimate_value(proj.get(name, 0.0), salary.get(name, 0.0))
             value_term = max(v, 0.0) ** cfg.alpha
-            quota_term = (quota_left + 1e-6) ** cfg.beta
+            quota_term = (quota_for_weight + 1e-6) ** beta_eff
             corr_term = np.exp(cfg.gamma * corr_with_lineup(name))
             rule_term = _rule_penalty(
                 name,
@@ -414,6 +594,28 @@ def _sample_flex_sequence(
             for name in universe:
                 if name in current_lineup or name in flex_players:
                     continue
+                used_salary = _lineup_salary(
+                    cpt=current_lineup[0], flex_players=flex_players, salary_by_name=salary
+                )
+                cand_salary = float(salary.get(name, 0.0))
+                if used_salary + cand_salary > float(cfg.salary_cap):
+                    continue
+                slots_left_after = 5 - (len(flex_players) + 1)
+                if slots_left_after > 0:
+                    if not _salary_bounds_feasible(
+                        used_salary=used_salary + cand_salary,
+                        slots_left=slots_left_after,
+                        cfg=cfg,
+                        pairs=pairs,
+                        prefix=prefix,
+                        pos=pos_map,
+                        exclude_name=str(name),
+                    ):
+                        continue
+                else:
+                    total_after = used_salary + cand_salary
+                    if total_after < float(cfg.min_salary):
+                        continue
                 v = _estimate_value(proj.get(name, 0.0), salary.get(name, 0.0))
                 value_term = max(v, 0.0)
                 corr_term = np.exp(0.5 * corr_with_lineup(name))
@@ -481,37 +683,83 @@ def build_quota_balanced_field(
 
     lineups: List[Dict[str, str]] = []
 
-    for _ in range(field_size):
-        # Sample CPT.
-        cpt = _sample_cpt(
-            rng=rng,
-            universe=universe,
-            remaining_cpt=remaining_cpt,
-            proj=proj,
-            salary=salary,
-            pos=pos,
-            cfg=cfg,
-        )
-        remaining_cpt[cpt] = remaining_cpt.get(cpt, 0) - 1
+    # Precompute an index of all flex salaries for CPT feasibility checks.
+    flex_salary_index = _build_sorted_salary_index([str(n) for n in universe], salary)
 
-        # Sample FLEX sequence.
-        flex_players = _sample_flex_sequence(
-            rng=rng,
-            universe=universe,
-            remaining_flex=remaining_flex,
-            proj=proj,
-            salary=salary,
-            pos=pos,
-            team=team,
-            corr_lookup=corr_lookup,
-            cfg=cfg,
-            current_lineup=[cpt],
-        )
+    for lineup_idx in range(field_size):
+        built = False
+        last_err: Exception | None = None
+        for attempt in range(int(cfg.max_attempts_per_lineup)):
+            relaxed = attempt >= int(cfg.relax_quotas_after_attempts)
+            # Transactional local copies: only commit if lineup is accepted.
+            local_cpt = dict(remaining_cpt)
+            local_flex = dict(remaining_flex)
+            try:
+                # Sample CPT.
+                cpt = _sample_cpt(
+                    rng=rng,
+                    universe=universe,
+                    remaining_cpt=local_cpt,
+                    proj=proj,
+                    salary=salary,
+                    pos=pos,
+                    cfg=cfg,
+                    relaxed_quotas=relaxed,
+                    flex_salary_index=flex_salary_index,
+                )
+                local_cpt[cpt] = local_cpt.get(cpt, 0) - 1
 
-        lineup_record: Dict[str, str] = {"cpt": cpt}
-        for i, name in enumerate(flex_players, start=1):
-            lineup_record[f"flex{i}"] = name
-        lineups.append(lineup_record)
+                # Sample FLEX sequence.
+                flex_players = _sample_flex_sequence(
+                    rng=rng,
+                    universe=universe,
+                    remaining_flex=local_flex,
+                    proj=proj,
+                    salary=salary,
+                    pos=pos,
+                    team=team,
+                    corr_lookup=corr_lookup,
+                    cfg=cfg,
+                    current_lineup=[cpt],
+                    relaxed_quotas=relaxed,
+                )
+
+                total_salary = _lineup_salary(
+                    cpt=cpt, flex_players=flex_players, salary_by_name=salary
+                )
+                if total_salary > float(cfg.salary_cap) or total_salary < float(cfg.min_salary):
+                    raise RuntimeError(
+                        "Constructed lineup violates salary constraints "
+                        f"(salary={total_salary:.1f}, min={cfg.min_salary}, cap={cfg.salary_cap})."
+                    )
+
+                # Commit quota decrements.
+                remaining_cpt[cpt] = remaining_cpt.get(cpt, 0) - 1
+                for p in flex_players:
+                    remaining_flex[p] = remaining_flex.get(p, 0) - 1
+
+                lineup_record: Dict[str, str] = {"cpt": cpt}
+                for i, name in enumerate(flex_players, start=1):
+                    lineup_record[f"flex{i}"] = name
+                lineups.append(lineup_record)
+                built = True
+                break
+            except Exception as exc:
+                last_err = exc
+                continue
+
+        if not built:
+            salaries = [float(salary.get(str(n), 0.0)) for n in universe]
+            s_min = min(salaries) if salaries else 0.0
+            s_max = max(salaries) if salaries else 0.0
+            raise RuntimeError(
+                "Failed to construct a valid field lineup under salary constraints "
+                f"after {cfg.max_attempts_per_lineup} attempts "
+                f"(lineup_index={lineup_idx}, min_salary={cfg.min_salary}, "
+                f"salary_cap={cfg.salary_cap}, universe_size={len(universe)}, "
+                f"salary_min={s_min:.1f}, salary_max={s_max:.1f}). "
+                f"Last error: {last_err}"
+            )
 
     df = pd.DataFrame(lineups, columns=LINEUP_COLS)
     return df

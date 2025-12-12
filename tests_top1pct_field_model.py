@@ -19,34 +19,35 @@ import numpy as np
 import pandas as pd
 
 from src.shared import top1pct_core
-from src.shared.field_builder import build_quota_balanced_field
+from src.shared.field_builder import FieldBuilderConfig, build_quota_balanced_field
 
 
 def _make_toy_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    # Simple 3-player toy slate with made-up projections and ownership.
-    players = ["A", "B", "C"]
+    # Simple toy slate with made-up projections and ownership.
+    # Need >= 6 distinct players for legal showdown lineups.
+    players = ["A", "B", "C", "D", "E", "F", "G", "H"]
 
     lineups_df = pd.DataFrame(
         [
-            {"cpt": "A", "flex1": "B", "flex2": "C", "flex3": "A", "flex4": "B", "flex5": "C"},
-            {"cpt": "B", "flex1": "A", "flex2": "C", "flex3": "A", "flex4": "B", "flex5": "C"},
+            {"cpt": "A", "flex1": "B", "flex2": "C", "flex3": "D", "flex4": "E", "flex5": "F"},
+            {"cpt": "B", "flex1": "A", "flex2": "C", "flex3": "D", "flex4": "G", "flex5": "H"},
         ]
     )
 
     ownership_df = pd.DataFrame(
         {
             "player": players,
-            "cpt_ownership": [40.0, 35.0, 25.0],
-            "flex_ownership": [60.0, 55.0, 45.0],
+            "cpt_ownership": [20.0, 18.0, 15.0, 12.0, 10.0, 10.0, 8.0, 7.0],
+            "flex_ownership": [35.0, 33.0, 30.0, 28.0, 25.0, 22.0, 20.0, 18.0],
         }
     )
 
     projections_df = pd.DataFrame(
         {
             "Name": players,
-            "Team": ["T1", "T1", "T2"],
-            "Salary": [10000, 9000, 8000],
-            "My Proj": [20.0, 18.0, 15.0],
+            "Team": ["T1", "T1", "T1", "T1", "T2", "T2", "T2", "T2"],
+            "Salary": [9000, 8500, 8000, 7500, 7200, 6800, 6400, 6000],
+            "My Proj": [22.0, 20.0, 18.5, 17.0, 16.0, 15.0, 14.0, 13.0],
         }
     )
 
@@ -59,6 +60,12 @@ def _make_toy_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Dat
 def _run_field_builder_smoke() -> None:
     lineups_df, ownership_df, projections_df, corr_df = _make_toy_inputs()
 
+    cfg = FieldBuilderConfig(
+        salary_cap=50_000,
+        min_salary=46_000,
+        max_attempts_per_lineup=200,
+        relax_quotas_after_attempts=10,
+    )
     field_df = build_quota_balanced_field(
         field_size=100,
         ownership_df=ownership_df,
@@ -66,12 +73,22 @@ def _run_field_builder_smoke() -> None:
         lineups_proj_df=projections_df,
         corr_df=corr_df,
         random_seed=123,
+        config=cfg,
     )
 
     assert not field_df.empty, "Field builder returned no lineups."
     assert {"cpt", "flex1", "flex2", "flex3", "flex4", "flex5"}.issubset(
         field_df.columns
     )
+    salary_map = dict(zip(projections_df["Name"], projections_df["Salary"]))
+    for _, row in field_df.iterrows():
+        cpt = str(row["cpt"])
+        flexes = [str(row[f"flex{i}"]) for i in range(1, 6)]
+        total_salary = 1.5 * float(salary_map.get(cpt, 0.0)) + sum(
+            float(salary_map.get(p, 0.0)) for p in flexes
+        )
+        assert total_salary <= cfg.salary_cap + 1e-6
+        assert total_salary >= cfg.min_salary - 1e-6
 
 
 def _run_top1pct_smoke(field_model: str) -> None:
@@ -106,6 +123,9 @@ def _run_top1pct_smoke(field_model: str) -> None:
     )
 
     assert output_path.is_file(), f"Top1pct output not written for field_model={field_model}."
+    if field_model == "explicit":
+        xls = pd.ExcelFile(output_path)
+        assert "Field Meta" in xls.sheet_names, "Missing Field Meta sheet for explicit field model."
 
 
 def main() -> None:
