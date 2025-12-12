@@ -7,17 +7,17 @@ todos:
     status: completed
   - id: nba-constraint-builders
     content: Create NBA-only ConstraintBuilder functions for CPT minutes floor, max low-proj UTILs, and minimum lineup salary.
-    status: in_progress
+    status: completed
     dependencies:
       - player-minutes-field
   - id: wire-into-nba-cli
     content: Attach NBA constraints in src/nba/showdown_optimizer_main.py for both single and multi-stack modes.
-    status: pending
+    status: completed
     dependencies:
       - nba-constraint-builders
   - id: add-tests
     content: Add solver-level tests validating the three constraints and infeasible behavior.
-    status: pending
+    status: completed
     dependencies:
       - wire-into-nba-cli
 ---

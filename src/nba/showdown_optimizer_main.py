@@ -27,6 +27,7 @@ from ..shared.lineup_optimizer import (
     load_players_from_sabersim,
     optimize_showdown_lineups,
 )
+from .showdown_constraints import build_nba_constraints
 from . import config
 
 
@@ -359,9 +360,9 @@ def main() -> None:
     players_by_id = {p.player_id: p for p in player_pool.players}
     teams = sorted({p.team for p in player_pool.players})
 
-    # No NBA-specific DFS constraints by default; stacking constraints are
-    # added only in multi-stack mode below.
-    base_constraint_builders: list = []
+    # NBA hard constraints (always enforced), plus optional stacking constraints
+    # added in multi-stack mode below.
+    base_constraint_builders: list = build_nba_constraints()
 
     # Optimize lineups (pattern can be a concrete path) and time the run.
     start_time = time.perf_counter()
