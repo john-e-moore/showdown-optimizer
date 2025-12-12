@@ -12,8 +12,10 @@ Example:
 
 import argparse
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 from pathlib import Path
+import json
 import time
 
 from datetime import datetime
@@ -196,7 +198,7 @@ def main() -> None:
         help=(
             "Number of lineups to solve per MILP chunk when generating many "
             "lineups. Set to 0 or a negative value to disable chunking and "
-            "use a single growing model (legacy behavior)."
+            "use a single growing model with growing no-duplicate constraints."
         ),
     )
     parser.add_argument(
@@ -227,6 +229,53 @@ def main() -> None:
         help=(
             "Optional explicit path for the output Excel workbook. "
             "If omitted, a timestamped file is written under outputs/nfl/lineups/."
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker threads to use for parallel optimization when "
+            "--parallel-mode is not 'none'."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-mode",
+        type=str,
+        choices=["none", "by_stack_pattern"],
+        default="none",
+        help=(
+            "Parallelization strategy when generating many lineups. "
+            "'none' runs everything sequentially. 'by_stack_pattern' "
+            "parallelizes across stack patterns in multi-stack mode."
+        ),
+    )
+    parser.add_argument(
+        "--use-warm-start",
+        action="store_true",
+        help=(
+            "Enable CBC warm starts when using the single-model path "
+            "(chunk-size <= 0), reusing solution information across lineups."
+        ),
+    )
+    parser.add_argument(
+        "--solver-max-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Optional per-solve time limit in seconds for the CBC solver. "
+            "When set, solves may stop early and return the best incumbent "
+            "solution found so far."
+        ),
+    )
+    parser.add_argument(
+        "--solver-rel-gap",
+        type=float,
+        default=None,
+        help=(
+            "Optional relative optimality gap for CBC (e.g., 0.005 for 0.5%). "
+            "Allows early termination once the MIP gap is small enough."
         ),
     )
 
@@ -263,6 +312,7 @@ def main() -> None:
     start_time = time.perf_counter()
 
     stack_pattern_labels: list[str] = []
+    pattern_metrics: list[dict[str, object]] = []
 
     if args.stack_mode == "none":
         lineups = optimize_showdown_lineups(
@@ -271,6 +321,9 @@ def main() -> None:
             salary_cap=args.salary_cap,
             constraint_builders=constraint_builders,
             chunk_size=args.chunk_size,
+            use_warm_start=args.use_warm_start,
+            max_seconds=args.solver_max_seconds,
+            rel_gap=args.solver_rel_gap,
         )
         stack_pattern_labels = ["none"] * len(lineups)
     else:
@@ -289,12 +342,21 @@ def main() -> None:
         all_lineups: list[Lineup] = []
         all_labels: list[str] = []
 
-        for pattern in STACK_PATTERNS:
-            n = pattern_counts.get(pattern, 0)
-            if n <= 0:
-                continue
+        def _optimize_for_stack_pattern(
+            pattern: str,
+            n: int,
+            *,
+            team_a: str,
+            team_b: str,
+            team_a_count: int,
+            team_b_count: int,
+        ) -> tuple[list[Lineup], str, dict[str, object]]:
+            """
+            Helper to optimize a batch of lineups for a single stack pattern.
 
-            team_a_count, team_b_count = STACK_PATTERN_COUNTS[pattern]
+            Returns:
+                (lineups, label, metrics_dict)
+            """
             stack_constraint = build_team_stack_constraint(
                 team_a=team_a,
                 team_b=team_b,
@@ -305,22 +367,85 @@ def main() -> None:
                 stack_constraint
             ]
 
+            start = time.perf_counter()
             pattern_lineups = optimize_showdown_lineups(
                 player_pool=player_pool,
                 num_lineups=n,
                 salary_cap=args.salary_cap,
                 constraint_builders=pattern_constraint_builders,
                 chunk_size=args.chunk_size,
+                use_warm_start=args.use_warm_start,
+                max_seconds=args.solver_max_seconds,
+                rel_gap=args.solver_rel_gap,
             )
-            if not pattern_lineups:
-                continue
+            elapsed_pattern = time.perf_counter() - start
 
             label = _build_stack_pattern_label(
                 pattern, team_a, team_b, team_a_count, team_b_count
             )
-            for lu in pattern_lineups:
-                all_lineups.append(lu)
-                all_labels.append(label)
+            metrics: dict[str, object] = {
+                "pattern": pattern,
+                "seconds": elapsed_pattern,
+                "num_lineups_requested": int(n),
+                "num_lineups_generated": int(len(pattern_lineups)),
+                "team_a": team_a,
+                "team_b": team_b,
+                "team_a_count": int(team_a_count),
+                "team_b_count": int(team_b_count),
+            }
+            return pattern_lineups, label, metrics
+
+        # Build jobs for each requested stack pattern in a fixed order.
+        pattern_jobs: list[tuple[str, int, int, int]] = []
+        for pattern in STACK_PATTERNS:
+            n = pattern_counts.get(pattern, 0)
+            if n <= 0:
+                continue
+            team_a_count, team_b_count = STACK_PATTERN_COUNTS[pattern]
+            pattern_jobs.append((pattern, n, team_a_count, team_b_count))
+
+        # Parallelize across patterns when requested; otherwise run sequentially.
+        if args.parallel_mode == "by_stack_pattern" and args.num_workers > 1:
+            with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+                futures = [
+                    executor.submit(
+                        _optimize_for_stack_pattern,
+                        pattern,
+                        n,
+                        team_a=team_a,
+                        team_b=team_b,
+                        team_a_count=team_a_count,
+                        team_b_count=team_b_count,
+                    )
+                    for (pattern, n, team_a_count, team_b_count) in pattern_jobs
+                ]
+
+                for (pattern, _n, _a_count, _b_count), fut in zip(
+                    pattern_jobs, futures
+                ):
+                    pattern_lineups, label, metrics = fut.result()
+                    if not pattern_lineups:
+                        continue
+                    pattern_metrics.append(metrics)
+                    for lu in pattern_lineups:
+                        all_lineups.append(lu)
+                        all_labels.append(label)
+        else:
+            for pattern, n, team_a_count, team_b_count in pattern_jobs:
+                pattern_lineups, label, metrics = _optimize_for_stack_pattern(
+                    pattern,
+                    n,
+                    team_a=team_a,
+                    team_b=team_b,
+                    team_a_count=team_a_count,
+                    team_b_count=team_b_count,
+                )
+                if not pattern_lineups:
+                    continue
+                pattern_metrics.append(metrics)
+                for lu in pattern_lineups:
+                    all_lineups.append(lu)
+                    all_labels.append(label)
 
         # Deduplicate by player composition across all runs.
         dedup_lineups: list[Lineup] = []
@@ -339,6 +464,23 @@ def main() -> None:
         stack_pattern_labels = dedup_labels
     elapsed = time.perf_counter() - start_time
 
+    num_generated = len(lineups)
+    opt_time_parts = [
+        f"seconds={elapsed:.3f}",
+        f"num_lineups_requested={args.num_lineups}",
+        f"num_lineups_generated={num_generated}",
+        f"stack_mode={args.stack_mode}",
+        f"chunk_size={args.chunk_size}",
+        f"parallel_mode={args.parallel_mode}",
+        f"num_workers={args.num_workers}",
+    ]
+    if args.solver_max_seconds is not None:
+        opt_time_parts.append(f"solver_max_seconds={args.solver_max_seconds}")
+    if args.solver_rel_gap is not None:
+        opt_time_parts.append(f"solver_rel_gap={args.solver_rel_gap}")
+    opt_time_line = "OPT_TIME " + " ".join(opt_time_parts)
+    print(opt_time_line)
+
     if not lineups:
         print("No feasible lineups found.")
         if elapsed < 60.0:
@@ -356,7 +498,7 @@ def main() -> None:
         seconds = int(elapsed % 60)
         print(f"Optimization completed in {minutes}m {seconds}s.")
 
-    print(f"Generated {len(lineups)} lineups.")
+    print(f"Generated {num_generated} lineups.")
 
     # ------------------------------------------------------------------
     # Compute exposure statistics across generated lineups.
@@ -524,6 +666,33 @@ def main() -> None:
         ownership_df.to_excel(writer, sheet_name="Ownership", index=False)
         exposure_df.to_excel(writer, sheet_name="Exposure", index=False)
         lineups_df.to_excel(writer, sheet_name="Lineups", index=False)
+
+    # ------------------------------------------------------------------
+    # Persist machine-readable optimization metrics alongside the workbook.
+    # ------------------------------------------------------------------
+    metrics: dict[str, object] = {
+        "optimizer_seconds": elapsed,
+        "num_lineups_requested": int(args.num_lineups),
+        "num_lineups_generated": int(num_generated),
+        "stack_mode": args.stack_mode,
+        "chunk_size": int(args.chunk_size),
+        "parallel_mode": args.parallel_mode,
+        "num_workers": int(args.num_workers),
+        "solver_max_seconds": args.solver_max_seconds,
+        "solver_rel_gap": args.solver_rel_gap,
+        "timestamp": timestamp,
+        "output_excel": str(output_path),
+    }
+    if pattern_metrics:
+        metrics["per_pattern"] = pattern_metrics
+
+    metrics_path = output_path.with_name(output_path.stem + "_metrics.json")
+    try:
+        with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"Wrote optimizer metrics to {metrics_path}")
+    except OSError as exc:
+        print(f"Warning: failed to write optimizer metrics JSON: {exc}")
 
     print(f"Wrote lineup workbook to {output_path}")
 

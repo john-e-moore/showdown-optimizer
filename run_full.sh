@@ -27,6 +27,22 @@
 #       '5|1=0.2,4|2=0.2,3|3=0.2,2|4=0.2,1|5=0.2'.
 #   - DIVERSIFIED_NUM is the number of diversified lineups to select from the
 #     top1pct output; it defaults to NUM_LINEUPS when omitted.
+#   - Optional environment variables:
+#       * NUM_WORKERS: when >1 and STACK_MODE='multi', enable parallelization
+#         across stack patterns in the optimizer CLI.
+#       * PARALLEL_MODE: parallelization strategy passed through to the
+#         optimizer (defaults to 'by_stack_pattern' when NUM_WORKERS>1).
+#       * SOLVER_MAX_SECONDS: optional per-solve CBC time limit passed to the
+#         optimizer CLI.
+#       * SOLVER_REL_GAP: optional relative MIP gap (e.g., 0.005 for 0.5%)
+#         passed to the optimizer CLI.
+#       * USE_WARM_START: when set to 1, enable CBC warm starts in the
+#         optimizer's single-model path.
+#       * EXTRA_FIELD_LINEUPS: when >0, insert an augmentation step that adds
+#         this many quota-balanced field-style lineups to the optimizer
+#         workbook before running top1% scoring.
+#       * CHUNK_SIZE: optional override for the optimizer --chunk-size flag
+#         (defaults to 0 to reuse a single growing model when unset).
 #   - The script assumes it is run from the project root, or that Python can
 #     find the `src` package from the current directory.
 
@@ -41,11 +57,19 @@ if [[ "${#}" -lt 1 ]]; then
 fi
 
 SABERSIM_CSV="$1"
-FIELD_SIZE="${2:-500}"
-NUM_LINEUPS="${3:-2000}"
+FIELD_SIZE="${2:-250}"
+NUM_LINEUPS="${3:-200}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
+
+# Default parallelization settings for multi-stack runs. These can be
+# overridden by exporting NUM_WORKERS or PARALLEL_MODE before invoking the
+# script, e.g. NUM_WORKERS=1 to force sequential behavior.
+NUM_WORKERS="${NUM_WORKERS:-5}"
+PARALLEL_MODE="${PARALLEL_MODE:-by_stack_pattern}"
+
+CHUNK_SIZE_ENV="${CHUNK_SIZE:-0}"
 
 # If a 7th argument is provided, treat it as an explicit override for the
 # number of diversified lineups to select. Otherwise, default to the number
@@ -100,6 +124,27 @@ if [[ -n "${STACK_WEIGHTS}" ]]; then
   OPT_STACK_WEIGHTS=(--stack-weights "${STACK_WEIGHTS}")
 fi
 
+OPT_PARALLEL=()
+if [[ "${STACK_MODE}" == "multi" ]]; then
+  NUM_WORKERS_ENV="${NUM_WORKERS}"
+  PARALLEL_MODE_ENV="${PARALLEL_MODE}"
+  if [[ "${NUM_WORKERS_ENV}" -gt 1 ]]; then
+    OPT_PARALLEL=(--parallel-mode "${PARALLEL_MODE_ENV}" --num-workers "${NUM_WORKERS_ENV}")
+    echo "         parallel mode: ${PARALLEL_MODE_ENV} with ${NUM_WORKERS_ENV} workers"
+  fi
+fi
+
+SOLVER_OPTS=()
+if [[ -n "${SOLVER_MAX_SECONDS:-}" ]]; then
+  SOLVER_OPTS+=(--solver-max-seconds "${SOLVER_MAX_SECONDS}")
+fi
+if [[ -n "${SOLVER_REL_GAP:-}" ]]; then
+  SOLVER_OPTS+=(--solver-rel-gap "${SOLVER_REL_GAP}")
+fi
+if [[ "${USE_WARM_START:-0}" == "1" ]]; then
+  SOLVER_OPTS+=(--use-warm-start)
+fi
+
 LINEUPS_EXCEL="${RUN_DIR}/lineups_${timestamp}.xlsx"
 
 python -m src.nfl.showdown_optimizer_main \
@@ -107,8 +152,30 @@ python -m src.nfl.showdown_optimizer_main \
   --num-lineups "${NUM_LINEUPS}" \
   --salary-cap "${SALARY_CAP}" \
   --output-excel "${LINEUPS_EXCEL}" \
+  --chunk-size "${CHUNK_SIZE_ENV}" \
   "${OPT_STACK_MODE[@]}" \
-  "${OPT_STACK_WEIGHTS[@]}"
+  "${OPT_STACK_WEIGHTS[@]}" \
+  "${OPT_PARALLEL[@]}" \
+  "${SOLVER_OPTS[@]}"
+
+EXTRA_FIELD_LINEUPS_ENV="${EXTRA_FIELD_LINEUPS:-0}"
+if [[ "${EXTRA_FIELD_LINEUPS_ENV}" -gt 0 ]]; then
+  echo
+  echo "================================================================"
+  echo "Optional augmentation: adding ${EXTRA_FIELD_LINEUPS_ENV} field-style lineups"
+  echo "         Correlation workbook: ${CORR_EXCEL}"
+  echo "         Base lineups workbook: ${LINEUPS_EXCEL}"
+  echo "================================================================"
+
+  AUGMENTED_LINEUPS_EXCEL="${RUN_DIR}/lineups_${timestamp}_augmented.xlsx"
+  python -m src.nfl.augment_lineups_with_field \
+    --lineups-excel "${LINEUPS_EXCEL}" \
+    --corr-excel "${CORR_EXCEL}" \
+    --extra-lineups "${EXTRA_FIELD_LINEUPS_ENV}" \
+    --output-excel "${AUGMENTED_LINEUPS_EXCEL}"
+
+  LINEUPS_EXCEL="${AUGMENTED_LINEUPS_EXCEL}"
+fi
 
 echo
 echo "================================================================"
