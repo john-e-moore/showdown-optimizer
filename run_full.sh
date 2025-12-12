@@ -58,7 +58,7 @@ fi
 
 SABERSIM_CSV="$1"
 FIELD_SIZE="${2:-250}"
-NUM_LINEUPS="${3:-200}"
+NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
@@ -69,7 +69,7 @@ STACK_WEIGHTS="${6-}"
 NUM_WORKERS="${NUM_WORKERS:-5}"
 PARALLEL_MODE="${PARALLEL_MODE:-by_stack_pattern}"
 
-CHUNK_SIZE_ENV="${CHUNK_SIZE:-0}"
+CHUNK_SIZE_ENV="${CHUNK_SIZE:-100}"
 
 # If a 7th argument is provided, treat it as an explicit override for the
 # number of diversified lineups to select. Otherwise, default to the number

@@ -72,8 +72,8 @@ fi
 
 SABERSIM_CSV="$1"
 CORR_EXCEL="$2"
-FIELD_SIZE="${3:-784}"
-NUM_LINEUPS="${4:-500}"
+FIELD_SIZE="${3:-5228}"
+NUM_LINEUPS="${4:-2500}"
 SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
@@ -97,7 +97,7 @@ fi
 
 MAX_FLEX_OVERLAP="${9:-5}"
 CPT_FIELD_CAP_MULTIPLIER="${10:-1.5}"
-CHUNK_SIZE_ENV="${CHUNK_SIZE:-0}"
+CHUNK_SIZE_ENV="${CHUNK_SIZE:-100}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
   echo "Error: Sabersim CSV not found at '${SABERSIM_CSV}'" >&2
@@ -201,7 +201,7 @@ python -m src.nba.top1pct_finish_rate_nba \
   --field-size "${FIELD_SIZE}" \
   --lineups-excel "${LINEUPS_EXCEL}" \
   --corr-excel "${CORR_EXCEL}" \
-  --num-sims 20000 \
+  --num-sims 100000 \
   --field-model "explicit" \
   --run-dir "${RUN_DIR}"
 
@@ -217,7 +217,7 @@ echo "================================================================"
 
 python -m src.nba.diversify_lineups_nba \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 0.01 \
+  --min-top1-pct 1.0 \
   --max-overlap 5 \
   --max-flex-overlap "${MAX_FLEX_OVERLAP}" \
   --cpt-field-cap-multiplier "${CPT_FIELD_CAP_MULTIPLIER}" \
