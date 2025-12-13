@@ -72,8 +72,8 @@ fi
 
 SABERSIM_CSV="$1"
 CORR_EXCEL="$2"
-FIELD_SIZE="${3:-5228}"
-NUM_LINEUPS="${4:-2000}"
+FIELD_SIZE="${3:-6535}"
+NUM_LINEUPS="${4:-5000}"
 SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
@@ -96,7 +96,7 @@ else
 fi
 
 MAX_FLEX_OVERLAP="${9:-5}"
-CPT_FIELD_CAP_MULTIPLIER="${10:-1.5}"
+CPT_FIELD_CAP_MULTIPLIER="${10:-1.9}"
 CHUNK_SIZE_ENV="${CHUNK_SIZE:-100}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
@@ -217,7 +217,7 @@ echo "================================================================"
 
 python -m src.nba.diversify_lineups_nba \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 1.0 \
+  --min-top1-pct 0.7 \
   --max-overlap 5 \
   --max-flex-overlap "${MAX_FLEX_OVERLAP}" \
   --cpt-field-cap-multiplier "${CPT_FIELD_CAP_MULTIPLIER}" \

@@ -566,6 +566,7 @@ Run a flashback contest simulation for a completed NBA Showdown slate.
 python -m src.nba.flashback_sim_nba \
   --contest-csv data/nba/contests/contest_<id>.csv \
   --sabersim-csv data/nba/sabersim/NBA_<slate>.csv \
+  --corr-excel data/nba/correlations/NBA_<slate>_corr_matrix.xlsx \
   --payouts-csv data/nba/payouts/payouts_<id>.json \
   --num-sims 100000
 ```
@@ -575,6 +576,10 @@ python -m src.nba.flashback_sim_nba \
     - Default: most recent `.csv` in that directory.
   - **`--sabersim-csv`**: Sabersim projections CSV under `data/nba/sabersim/`.
     - Default: most recent `.csv` in that directory.
+  - **`--corr-excel`**: Correlations Excel workbook under `data/nba/correlations/`.
+    - Default: most recent `.xlsx` in that directory.
+    - Must contain sheets `Sabersim_Projections` and `Correlation_Matrix`.
+    - If missing/unreadable, the flashback sim errors (generate the workbook or pass an explicit path).
   - **`--payouts-csv`**: DraftKings payout JSON under `data/nba/payouts/`.
     - Same semantics as NFL flashback script.
   - **`--num-sims`**: Number of Monte Carlo simulations.

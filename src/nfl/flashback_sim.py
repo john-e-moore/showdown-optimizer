@@ -17,6 +17,7 @@ from . import build_corr_matrix_from_projections, config, simulation_corr
 def run(
     contest_csv: str | None = None,
     sabersim_csv: str | None = None,
+    corr_excel: str | None = None,
     num_sims: int = 100_000,
     random_seed: int | None = None,
     payouts_csv: str | None = None,
@@ -27,6 +28,7 @@ def run(
     return flashback_core.run_flashback(
         contest_csv=contest_csv,
         sabersim_csv=sabersim_csv,
+        corr_excel=corr_excel,
         num_sims=num_sims,
         random_seed=random_seed,
         payouts_csv=payouts_csv,
@@ -67,6 +69,16 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--corr-excel",
+        type=str,
+        default=None,
+        help=(
+            "Path to correlations Excel workbook under data/nfl/correlations/. "
+            "If omitted, the most recent .xlsx file in that directory is used. "
+            "Workbook must contain 'Sabersim_Projections' and 'Correlation_Matrix' sheets."
+        ),
+    )
+    parser.add_argument(
         "--payouts-csv",
         type=str,
         default=None,
@@ -100,6 +112,7 @@ def main(argv: List[str] | None = None) -> None:
     run(
         contest_csv=args.contest_csv,
         sabersim_csv=args.sabersim_csv,
+        corr_excel=args.corr_excel,
         num_sims=args.num_sims,
         random_seed=args.random_seed,
         payouts_csv=args.payouts_csv,

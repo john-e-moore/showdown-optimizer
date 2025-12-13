@@ -30,6 +30,8 @@ from typing import Dict, Iterable, List, Sequence, Tuple, Callable, Any
 import numpy as np
 import pandas as pd
 
+from . import top1pct_core
+
 
 DK_PAYOUT_URL_TEMPLATE = (
     "https://api.draftkings.com/contests/v1/contests/{contest_id}?format=json"
@@ -62,6 +64,34 @@ def _resolve_latest_csv(directory: Path, explicit: str | None) -> Path:
     candidates = sorted(directory.glob("*.csv"), key=lambda p: p.stat().st_mtime)
     if not candidates:
         raise FileNotFoundError(f"No .csv files found in directory: {directory}")
+    return candidates[-1]
+
+
+def _resolve_latest_excel(directory: Path, explicit: str | None) -> Path:
+    """
+    Resolve an Excel workbook path, preferring an explicit argument when provided.
+
+    If explicit is None, pick the most recent *.xlsx file in `directory`.
+
+    Notes:
+      - Ignores temporary Excel lockfiles that start with '~$'.
+    """
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Specified correlation workbook does not exist: {path}"
+            )
+        return path
+
+    candidates = [
+        p
+        for p in directory.glob("*.xlsx")
+        if p.is_file() and not p.name.startswith("~$")
+    ]
+    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        raise FileNotFoundError(f"No .xlsx files found in directory: {directory}")
     return candidates[-1]
 
 
@@ -400,6 +430,29 @@ def _build_player_universe_from_sabersim_and_lineups(
 
     sabersim = sabersim_df.copy()
     sabersim["Name"] = sabersim[name_col].astype(str)
+
+    # Handle possible duplicate Name entries (e.g. CPT vs non-CPT rows from a
+    # raw Sabersim export). For flashback we need a single flex-style row per
+    # player name because contest lineup strings do not carry team info.
+    #
+    # When duplicates exist, keep the *lower* projection row and drop the
+    # higher projection rows (which correspond to CPT rows in typical Sabersim
+    # Showdown outputs).
+    if sabersim["Name"].duplicated().any():
+        before = len(sabersim)
+        sabersim = (
+            sabersim.sort_values(by=["Name", dk_proj_col], ascending=[True, True])
+            .groupby("Name", as_index=False)
+            .first()
+        )
+        after = len(sabersim)
+        dropped = before - after
+        if dropped > 0:
+            print(
+                "Warning: Sabersim projections contained duplicate player names; "
+                f"dropped {dropped} higher-projection CPT rows, keeping one flex-style row per player."
+            )
+
     sabersim_indexed = sabersim.set_index("Name")
 
     mu_saber = sabersim_indexed[dk_proj_col].astype(float)
@@ -995,6 +1048,7 @@ def run_flashback(
     *,
     contest_csv: str | None,
     sabersim_csv: str | None,
+    corr_excel: str | None,
     num_sims: int,
     random_seed: int | None,
     payouts_csv: str | None,
@@ -1037,9 +1091,11 @@ def run_flashback(
     # Resolve input paths.
     contest_dir = config_module.DATA_DIR / "contests"
     sabersim_dir = config_module.SABERSIM_DIR
+    corr_dir = config_module.DATA_DIR / "correlations"
 
     contest_path = _resolve_latest_csv(contest_dir, contest_csv)
     sabersim_path = _resolve_latest_csv(sabersim_dir, sabersim_csv)
+    corr_path = _resolve_latest_excel(corr_dir, corr_excel)
 
     # Extract contest_id from the contest standings filename.
     contest_filename = contest_path.name
@@ -1052,6 +1108,7 @@ def run_flashback(
 
     print(f"Using contest CSV: {contest_path}")
     print(f"Using Sabersim CSV: {sabersim_path}")
+    print(f"Using correlation workbook: {corr_path}")
 
     # Load contest standings and parse lineups.
     standings_df, parsed_lineups = _load_contest_lineups(contest_path)
@@ -1077,11 +1134,12 @@ def run_flashback(
         _build_player_universe_and_weights(parsed_lineups)
     )
 
-    # Load Sabersim projections and build correlation matrix via simulation.
+    # Load Sabersim projections + correlation matrix from workbook (precomputed).
+    #
+    # We still read the raw Sabersim CSV for ownership/salary columns later in the
+    # workbook output (those are not stored in the correlations workbook).
     sabersim_raw_df = pd.read_csv(sabersim_path)
-    sabersim_df = load_sabersim_projections(sabersim_path)
-    print("Building player correlation matrix via simulation...")
-    corr_df = simulate_corr_matrix_from_projections(sabersim_df)
+    sabersim_df, corr_df = top1pct_core._load_corr_workbook(corr_path)
 
     # Build unified player universe and correlation matrix.
     universe_names, mu, sigma = _build_player_universe_from_sabersim_and_lineups(
