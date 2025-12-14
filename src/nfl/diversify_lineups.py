@@ -30,6 +30,7 @@ def run(
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
     output_dir: str | None = None,
+    sort_by: str = "top1_pct_finish_rate",
     max_flex_overlap: int | None = None,
     cpt_field_cap_multiplier: float | None = None,
     lineups_excel: str | None = None,
@@ -106,6 +107,7 @@ def run(
         min_top1_pct=min_top1_pct,
         max_overlap=max_overlap,
         top1pct_excel=resolved_top1pct_excel,
+        sort_by=sort_by,
         max_flex_overlap=max_flex_overlap,
         cpt_max_share=cpt_max_share,
     )
@@ -211,6 +213,16 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sort-by",
+        type=str,
+        choices=["top1_pct_finish_rate", "ev_roi"],
+        default="top1_pct_finish_rate",
+        help=(
+            "Column to sort candidate lineups by before greedy diversification. "
+            "Use 'ev_roi' when top1pct scoring was run with --contest-id."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
@@ -230,6 +242,7 @@ def main(argv: List[str] | None = None) -> None:
         max_overlap=args.max_overlap,
         top1pct_excel=args.top1pct_excel,
         output_dir=args.output_dir,
+        sort_by=args.sort_by,
         max_flex_overlap=args.max_flex_overlap,
         cpt_field_cap_multiplier=args.cpt_field_cap_multiplier,
         lineups_excel=args.lineups_excel,

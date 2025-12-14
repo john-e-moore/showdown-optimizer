@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from .field_builder import build_quota_balanced_field
+from .dk_contest_api import load_contest_payouts_and_size
 
 
 LINEUPS_SHEET_NAME = "Lineups"
@@ -681,7 +682,7 @@ def _annotate_lineups_with_meta(
 
 
 def run_top1pct(
-    field_size: int,
+    field_size: int | None,
     outputs_dir: Path,
     *,
     lineups_excel: str | None = None,
@@ -693,12 +694,19 @@ def run_top1pct(
     flex_var_factor: float = 3.5,
     field_model: str = "mixture",
     run_dir: Path | None = None,
+    # Optional contest-based EV ROI computation
+    contest_id: str | None = None,
+    payouts_json: str | None = None,
+    data_dir: Path | None = None,
+    sim_batch_size: int = 200,
 ) -> Path:
     """
     Execute the top 1% finish rate estimation pipeline for a given sport.
 
     Args:
-        field_size: Total number of lineups in the contest field.
+        field_size: Total number of lineups in the contest field. When contest_id
+            is provided, field_size may be omitted (None) and will be inferred
+            from DraftKings contest metadata.
         outputs_dir: Root outputs directory for the sport
                      (e.g. outputs/nfl or outputs/nba).
         lineups_excel: Optional explicit path to a lineups workbook.
@@ -718,6 +726,15 @@ def run_top1pct(
         run_dir: Optional explicit directory for the output workbook. When
             provided, the top1pct workbook is written directly into this
             directory instead of outputs_dir / \"top1pct\".
+        contest_id: Optional DraftKings contest id. When provided, we will fetch
+            payout structure and compute per-lineup EV payout + EV ROI using an
+            explicit field model.
+        payouts_json: Optional path to a cached DK contest JSON file. When
+            provided, bypasses the download and reads this file directly.
+        data_dir: Data directory for the sport (e.g. data/nfl or data/nba). This
+            is required when contest_id is provided so we can cache contest JSON.
+        sim_batch_size: Batch size for simulation streaming. Smaller values use
+            less memory but may be slower.
 
     Returns:
         Path to the written output Excel workbook.
@@ -754,6 +771,63 @@ def run_top1pct(
     corr_full = _build_full_correlation(player_names, corr_df)
     rng = np.random.default_rng(random_seed)
 
+    # ------------------------------------------------------------------
+    # Optional contest metadata for EV payout / EV ROI.
+    # ------------------------------------------------------------------
+    entry_fee: float | None = None
+    payouts_full: np.ndarray | None = None
+    payout_prefix: np.ndarray | None = None
+    paid_places: int = 0
+
+    inferred_field_size: int | None = None
+    if contest_id is not None:
+        if data_dir is None:
+            raise ValueError("data_dir must be provided when contest_id is set.")
+
+        dk_field_size, dk_entry_fee, dk_payouts = load_contest_payouts_and_size(
+            str(contest_id),
+            data_dir=data_dir,
+            payouts_json=payouts_json,
+        )
+        inferred_field_size = int(dk_field_size)
+        entry_fee = float(dk_entry_fee)
+
+        if field_size is None:
+            field_size = inferred_field_size
+        else:
+            # Allow explicit override but warn if it differs from DK metadata.
+            if int(field_size) != inferred_field_size:
+                print(
+                    "Warning: --field-size does not match DraftKings contest metadata "
+                    f"({field_size} != {inferred_field_size}). Proceeding with "
+                    f"field_size={field_size} for simulation."
+                )
+
+        # Normalize payouts to the simulation field size.
+        payouts_full = np.zeros(int(field_size), dtype=float)
+        dk_arr = np.asarray(dk_payouts, dtype=float).reshape(-1)
+        n_copy = min(payouts_full.size, dk_arr.size)
+        if n_copy > 0:
+            payouts_full[:n_copy] = dk_arr[:n_copy]
+        paid_places = int(np.sum(payouts_full > 0.0))
+        payout_prefix = np.concatenate([[0.0], np.cumsum(payouts_full)])
+
+        # ROI needs an explicit field to define rank→payout; auto-upgrade.
+        if field_model == "mixture":
+            print(
+                "contest_id provided; switching field_model from 'mixture' to "
+                "'explicit' to enable EV ROI computation."
+            )
+            field_model = "explicit"
+
+    if field_size is None:
+        raise ValueError(
+            "field_size is required unless contest_id is provided (to infer it)."
+        )
+
+    if sim_batch_size <= 0:
+        raise ValueError("sim_batch_size must be positive.")
+
     print(
         f"Simulating correlated DK scores for {len(player_names)} players across "
         f"{num_sims} simulations..."
@@ -771,11 +845,8 @@ def run_top1pct(
     X[:, non_dst_k_mask] = np.maximum(X[:, non_dst_k_mask], 0.0)
 
     player_index = {name: i for i, name in enumerate(player_names)}
-    print("Scoring lineups across simulations...")
+    print("Building lineup weight matrices...")
     W = _build_lineup_weights(lineups_df=lineups_df, player_index=player_index)
-
-    # scores[s, k] = sum_i w_k[i] * X[s, i] for candidate lineups.
-    scores = X @ W.T  # shape (S, K_candidates)
 
     if field_model not in {"mixture", "explicit"}:
         raise ValueError(
@@ -785,6 +856,10 @@ def run_top1pct(
     field_lineups_with_meta: pd.DataFrame | None = None
     field_lineups_df: pd.DataFrame | None = None
     field_meta_payload: Dict[str, pd.DataFrame] | None = None
+
+    thresholds: np.ndarray | None = None
+    W_field: np.ndarray | None = None
+    K_field: int = 0
 
     if field_model == "mixture":
         print("Computing field 99th percentile thresholds from ownership (mixture model)...")
@@ -797,12 +872,16 @@ def run_top1pct(
             flex_var_factor=flex_var_factor,
         )
     else:
-        print(
-            "Building explicit quota-balanced field lineups and computing "
-            "empirical 99th-percentile thresholds..."
-        )
+        print("Building explicit quota-balanced field lineups...")
+
+        # For contest-id ROI, treat the explicit field as *opponents* so that
+        # (opponents + your lineup) approximates the DK contest field size.
+        effective_field_size = int(field_size)
+        if contest_id is not None:
+            effective_field_size = max(1, int(field_size) - 1)
+
         field_lineups_df = build_quota_balanced_field(
-            field_size=field_size,
+            field_size=effective_field_size,
             ownership_df=ownership_df,
             sabersim_proj_df=sabersim_proj_df,
             lineups_proj_df=lineups_proj_df,
@@ -813,14 +892,9 @@ def run_top1pct(
             lineups_df=field_lineups_df,
             player_index=player_index,
         )
-        # scores_field[s, k] = sum_i w_k[i] * X[s, i] for field lineups.
-        scores_field = X @ W_field.T  # shape (S, K_field)
-        K_field = scores_field.shape[1]
+        K_field = int(W_field.shape[0])
         if K_field == 0:
             raise ValueError("Explicit field builder produced zero field lineups.")
-        # Empirical ~99th-percentile threshold per simulation using partial sort.
-        q_index = max(0, min(K_field - 1, int(np.floor(0.99 * K_field))))
-        thresholds = np.partition(scores_field, q_index, axis=1)[:, q_index]
 
         # Build a Field Lineups sheet with per-lineup metadata for the explicit
         # field model. Use a simple sport hint based on the outputs_dir.
@@ -880,18 +954,111 @@ def run_top1pct(
             "flex_ownership": flex_counts,
             "stack_distribution": stack_counts,
         }
-    if thresholds.shape[0] != scores.shape[0]:
-        raise ValueError("Thresholds array must have length equal to num_sims.")
+    # ------------------------------------------------------------------
+    # Streaming scoring: compute top1%, mean/std, and optional EV payout/ROI
+    # without materializing (num_sims x num_lineups) matrices.
+    # ------------------------------------------------------------------
+    num_lineups = int(W.shape[0])
+    top1_hits = np.zeros(num_lineups, dtype=np.int64)
+    mean_scores = np.zeros(num_lineups, dtype=float)
+    m2_scores = np.zeros(num_lineups, dtype=float)
+    payout_sums = np.zeros(num_lineups, dtype=float) if contest_id is not None else None
 
-    indicators = scores >= thresholds[:, None]
-    p_top1 = indicators.mean(axis=0)
+    if field_model == "mixture" and thresholds is None:
+        raise RuntimeError("Internal error: thresholds not computed for mixture model.")
+    if field_model == "explicit" and W_field is None:
+        raise RuntimeError("Internal error: W_field not built for explicit model.")
 
-    # Per-lineup mean/std plus top 1% rate.
-    mean_scores = scores.mean(axis=0)
-    std_scores = scores.std(axis=0, ddof=0)
+    print("Scoring lineups across simulations (streaming)...")
+    n_seen = 0
+    for start in range(0, num_sims, sim_batch_size):
+        end = min(num_sims, start + sim_batch_size)
+        X_batch = X[start:end]  # (B, P)
+        B = int(X_batch.shape[0])
+
+        scores_cand = X_batch @ W.T  # (B, K)
+
+        # Welford updates for mean/std.
+        for i in range(B):
+            n_seen += 1
+            row = scores_cand[i]
+            delta = row - mean_scores
+            mean_scores += delta / float(n_seen)
+            delta2 = row - mean_scores
+            m2_scores += delta * delta2
+
+        if field_model == "mixture":
+            thr = thresholds[start:end]  # (B,)
+            top1_hits += (scores_cand >= thr[:, None]).sum(axis=0)
+        else:
+            # Explicit field: compute per-sim 99th percentile threshold from
+            # simulated field lineups for this batch.
+            scores_field = X_batch @ W_field.T  # (B, K_field)
+
+            q_index = max(0, min(K_field - 1, int(np.floor(0.99 * K_field))))
+            thr = np.partition(scores_field, q_index, axis=1)[:, q_index]
+            top1_hits += (scores_cand >= thr[:, None]).sum(axis=0)
+
+            # Optional: EV payout / EV ROI against DK contest payout structure.
+            if contest_id is not None and payouts_full is not None and payout_prefix is not None:
+                if paid_places > 0 and entry_fee is not None and entry_fee > 0.0:
+                    # For each sim-row, use the top paid_places field scores to
+                    # efficiently compute ranks/payouts for candidate lineups.
+                    for i in range(B):
+                        field_row = scores_field[i]
+                        cand_row = scores_cand[i]
+
+                        # Handle small fields gracefully.
+                        M = min(int(paid_places), int(field_row.shape[0]))
+                        if M <= 0:
+                            continue
+
+                        # Largest M field scores (opponents) for this sim.
+                        kth = int(field_row.shape[0]) - M
+                        topM = np.partition(field_row, kth)[kth:]
+                        topM_sorted = np.sort(topM)  # ascending
+                        cutoff = float(topM_sorted[0])
+
+                        paid_mask = cand_row >= cutoff
+                        if not np.any(paid_mask):
+                            continue
+
+                        # For paid candidates, compute tie groups within topM.
+                        # Note: ties across the full field are extremely rare with
+                        # continuous scoring; we treat ties within topM exactly.
+                        cand_paid = cand_row[paid_mask]
+                        left = np.searchsorted(topM_sorted, cand_paid, side="left")
+                        right = np.searchsorted(topM_sorted, cand_paid, side="right")
+
+                        # Elements > cand are those strictly above the insertion
+                        # point on the right in an ascending array.
+                        higher = M - right  # 0-indexed rank start
+                        eq_count = right - left
+                        group_len = eq_count + 1
+                        lo = higher
+                        hi = lo + group_len
+
+                        # Prefix-sum range query for payout sums.
+                        # If a tie group (pathologically) extends beyond the
+                        # contest field size, treat ranks beyond the field as
+                        # paying $0 by clamping hi but still dividing by the
+                        # full group length.
+                        hi_clamped = np.minimum(hi, int(payouts_full.size))
+                        payout_sum = payout_prefix[hi_clamped] - payout_prefix[lo]
+                        payout_vals = payout_sum / group_len.astype(float)
+
+                        if payout_sums is None:
+                            raise RuntimeError("Internal error: payout_sums missing.")
+                        payout_sums[paid_mask] += payout_vals
+
+    if n_seen != num_sims:
+        raise RuntimeError("Internal error: did not process expected number of simulations.")
+
+    p_top1 = top1_hits.astype(float) / float(num_sims)
+    std_scores = np.sqrt(m2_scores / float(num_sims))
     lineup_summary_df = pd.DataFrame(
         {
-            "rank": lineups_df.get("rank", pd.Series(range(1, scores.shape[1] + 1))),
+            "rank": lineups_df.get("rank", pd.Series(range(1, num_lineups + 1))),
             "mean_score": mean_scores,
             "std_score": std_scores,
             "top1_pct_finish_rate": 100.0 * p_top1,
@@ -901,6 +1068,16 @@ def run_top1pct(
     # Augment lineups DataFrame with top 1% probabilities.
     lineups_with_top1 = lineups_df.copy()
     lineups_with_top1["top1_pct_finish_rate"] = 100.0 * p_top1
+    lineups_with_top1["mean_score"] = mean_scores
+    lineups_with_top1["std_score"] = std_scores
+
+    if contest_id is not None and payout_sums is not None and entry_fee is not None:
+        avg_payout = payout_sums / float(num_sims)
+        ev_roi = (avg_payout - float(entry_fee)) / float(entry_fee) if float(entry_fee) > 0 else 0.0
+        lineups_with_top1["avg_payout"] = avg_payout
+        lineups_with_top1["ev_roi"] = ev_roi
+        lineups_with_top1["entry_fee"] = float(entry_fee)
+        lineups_with_top1["contest_id"] = str(contest_id)
 
     # Prepare output path.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -924,6 +1101,15 @@ def run_top1pct(
         {"key": "n_players", "value": len(player_names)},
         {"key": "n_lineups", "value": len(lineups_df)},
     ]
+    if contest_id is not None:
+        meta_rows.append({"key": "contest_id", "value": str(contest_id)})
+        if inferred_field_size is not None:
+            meta_rows.append({"key": "dk_field_size", "value": int(inferred_field_size)})
+        if entry_fee is not None:
+            meta_rows.append({"key": "entry_fee", "value": float(entry_fee)})
+        meta_rows.append({"key": "paid_places", "value": int(paid_places)})
+        if field_model == "explicit":
+            meta_rows.append({"key": "explicit_field_size_used", "value": int(K_field)})
     meta_df = pd.DataFrame(meta_rows)
 
     print(f"Writing top 1% estimates to {output_path}...")

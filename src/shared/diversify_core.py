@@ -122,6 +122,8 @@ def _greedy_diversified_selection(
     num_lineups: int,
     max_overlap: int,
     min_top1_pct: float,
+    *,
+    sort_by: str = "top1_pct_finish_rate",
     max_flex_overlap: int | None = None,
     cpt_max_share: dict[str, float] | None = None,
 ) -> pd.DataFrame:
@@ -130,7 +132,8 @@ def _greedy_diversified_selection(
 
     Strategy:
       1. Filter to lineups with top1_pct_finish_rate >= min_top1_pct.
-      2. Sort remaining lineups by top1_pct_finish_rate desc, then by
+      2. Sort remaining lineups by `sort_by` desc (default: top1%),
+         then by top1_pct_finish_rate desc when available, then by
          lineup_projection desc as a tie-breaker when available.
       3. Iterate in sorted order, accepting a lineup if:
            - total overlap (CPT + FLEX) with every already-selected lineup is
@@ -148,6 +151,12 @@ def _greedy_diversified_selection(
         # No lineups meet the threshold; return an empty DataFrame with same schema.
         return candidates
 
+    if sort_by not in candidates.columns:
+        raise KeyError(
+            f"Requested sort_by column '{sort_by}' not present in Lineups_Top1Pct. "
+            f"Available columns include: {sorted(candidates.columns.tolist())}"
+        )
+
     # Build player sets for diversification.
     candidates = candidates.copy()
     non_cpt_cols = _resolve_non_cpt_slot_columns(candidates)
@@ -158,8 +167,11 @@ def _greedy_diversified_selection(
         lambda r: _build_flex_set(r, non_cpt_cols), axis=1
     )
 
-    sort_cols: List[str] = ["top1_pct_finish_rate"]
+    sort_cols: List[str] = [sort_by]
     ascending: List[bool] = [False]
+    if sort_by != "top1_pct_finish_rate" and "top1_pct_finish_rate" in candidates.columns:
+        sort_cols.append("top1_pct_finish_rate")
+        ascending.append(False)
     if "lineup_projection" in candidates.columns:
         sort_cols.append("lineup_projection")
         ascending.append(False)
@@ -290,6 +302,7 @@ def run_diversify(
     min_top1_pct: float = 1.0,
     max_overlap: int = 4,
     top1pct_excel: str | None = None,
+    sort_by: str = "top1_pct_finish_rate",
     max_flex_overlap: int | None = None,
     cpt_max_share: dict[str, float] | None = None,
 ) -> Path:
@@ -303,6 +316,7 @@ def run_diversify(
         min_top1_pct: Minimum top1_pct_finish_rate (in percent) to keep.
         max_overlap: Maximum overlap allowed between any pair of lineups.
         top1pct_excel: Optional explicit path to a top1pct workbook.
+        sort_by: Column to sort candidate lineups by before greedy selection.
         max_flex_overlap: Optional maximum FLEX-only overlap allowed between
             any pair of selected lineups. If None, only total overlap is used.
 
@@ -329,6 +343,7 @@ def run_diversify(
         num_lineups=num_lineups,
         max_overlap=max_overlap,
         min_top1_pct=min_top1_pct,
+        sort_by=sort_by,
         max_flex_overlap=max_flex_overlap,
         cpt_max_share=cpt_max_share,
     )

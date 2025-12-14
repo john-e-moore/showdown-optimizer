@@ -33,7 +33,7 @@ from . import config
 
 
 def run(
-    field_size: int,
+    field_size: int | None,
     lineups_excel: str | None = None,
     corr_excel: str | None = None,
     num_sims: int = 20_000,
@@ -43,6 +43,9 @@ def run(
     flex_var_factor: float = 3.5,
     field_model: str = "mixture",
     run_dir: Path | None = None,
+    contest_id: str | None = None,
+    payouts_json: str | None = None,
+    sim_batch_size: int = 200,
 ) -> Path:
     """
     NFL wrapper around the shared top1pct core.
@@ -53,6 +56,7 @@ def run(
     return top1pct_core.run_top1pct(
         field_size=field_size,
         outputs_dir=config.OUTPUTS_DIR,
+        data_dir=config.DATA_DIR,
         lineups_excel=lineups_excel,
         corr_excel=corr_excel,
         num_sims=num_sims,
@@ -62,6 +66,9 @@ def run(
         flex_var_factor=flex_var_factor,
         field_model=field_model,
         run_dir=run_dir,
+        contest_id=contest_id,
+        payouts_json=payouts_json,
+        sim_batch_size=sim_batch_size,
     )
 
 
@@ -75,8 +82,30 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--field-size",
         type=int,
-        required=True,
-        help="Total number of lineups in the contest field (e.g., 23529).",
+        default=None,
+        help=(
+            "Total number of lineups in the contest field (e.g., 23529). "
+            "Optional when --contest-id is provided (field size is inferred)."
+        ),
+    )
+    parser.add_argument(
+        "--contest-id",
+        type=str,
+        default=None,
+        help=(
+            "Optional DraftKings contest id. When provided, the pipeline "
+            "downloads contest payout info and computes EV payout + EV ROI per "
+            "lineup."
+        ),
+    )
+    parser.add_argument(
+        "--payouts-json",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a cached DraftKings contest JSON file. When "
+            "provided, bypasses the download and reads this file directly."
+        ),
     )
     parser.add_argument(
         "--lineups-excel",
@@ -101,6 +130,15 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=int,
         default=100_000,
         help="Number of Monte Carlo simulations to run (default: 100000).",
+    )
+    parser.add_argument(
+        "--sim-batch-size",
+        type=int,
+        default=200,
+        help=(
+            "Simulation batch size for streaming scoring (default: 200). "
+            "Smaller values use less memory but may be slower."
+        ),
     )
     parser.add_argument(
         "--field-var-shrink",
@@ -164,6 +202,8 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
 
 def main(argv: List[str] | None = None) -> None:
     args = _parse_args(argv)
+    if args.field_size is None and args.contest_id is None:
+        raise SystemExit("Error: --field-size is required unless --contest-id is provided.")
     run(
         field_size=args.field_size,
         lineups_excel=args.lineups_excel,
@@ -175,6 +215,9 @@ def main(argv: List[str] | None = None) -> None:
         flex_var_factor=args.flex_var_factor,
         field_model=args.field_model,
         run_dir=Path(args.run_dir) if args.run_dir is not None else None,
+        contest_id=args.contest_id,
+        payouts_json=args.payouts_json,
+        sim_batch_size=args.sim_batch_size,
     )
 
 

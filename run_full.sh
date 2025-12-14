@@ -51,13 +51,43 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+# Optional flags (can appear anywhere after the required CSV):
+#   --contest-id <id>    Fetch DK contest payout structure and compute EV ROI
+#   --payouts-json <path> Use a pre-downloaded DK contest JSON instead of fetching
+CONTEST_ID=""
+PAYOUTS_JSON=""
+POSITIONAL=()
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --contest-id)
+      CONTEST_ID="${2:-}"
+      shift 2
+      ;;
+    --payouts-json)
+      PAYOUTS_JSON="${2:-}"
+      shift 2
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${POSITIONAL[@]}"
+
 if [[ "${#}" -lt 1 ]]; then
-  echo "Usage: $0 PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS]" >&2
+  echo "Usage: $0 PATH_TO_SABERSIM_CSV [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM] [--contest-id ID] [--payouts-json PATH]" >&2
   exit 1
 fi
 
 SABERSIM_CSV="$1"
-FIELD_SIZE="${2:-250}"
+FIELD_SIZE_ARG="${2-}"
+# If contest-id is provided, allow FIELD_SIZE to be omitted (infer via DK API).
+if [[ -n "${CONTEST_ID}" ]]; then
+  FIELD_SIZE="${FIELD_SIZE_ARG-}"
+else
+  FIELD_SIZE="${FIELD_SIZE_ARG:-250}"
+fi
 NUM_LINEUPS="${3:-2000}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
@@ -180,28 +210,57 @@ fi
 echo
 echo "================================================================"
 echo "Step 3/4: Estimating top 1% finish probabilities"
-echo "         Field size: ${FIELD_SIZE}"
+if [[ -n "${CONTEST_ID}" ]]; then
+  echo "         Contest id: ${CONTEST_ID} (field size inferred unless overridden)"
+else
+  echo "         Field size: ${FIELD_SIZE}"
+fi
 echo "         Using run-scoped lineups & correlations workbooks."
 echo "================================================================"
 
+TOP1_ARGS=()
+if [[ -n "${FIELD_SIZE}" ]]; then
+  TOP1_ARGS+=(--field-size "${FIELD_SIZE}")
+fi
+if [[ -n "${CONTEST_ID}" ]]; then
+  TOP1_ARGS+=(--contest-id "${CONTEST_ID}")
+fi
+if [[ -n "${PAYOUTS_JSON}" ]]; then
+  TOP1_ARGS+=(--payouts-json "${PAYOUTS_JSON}")
+fi
+
 python -m src.nfl.top1pct_finish_rate \
-  --field-size "${FIELD_SIZE}" \
   --lineups-excel "${LINEUPS_EXCEL}" \
   --corr-excel "${CORR_EXCEL}" \
   --field-model "explicit" \
-  --run-dir "${RUN_DIR}"
+  --run-dir "${RUN_DIR}" \
+  "${TOP1_ARGS[@]}"
 
 echo
 echo "================================================================"
 echo "Step 4/4: Selecting diversified lineups"
 echo "         Target diversified lineups: ${DIVERSIFIED_NUM}"
-echo "         Min top1% finish rate: 0.25%"
+if [[ -n "${CONTEST_ID}" ]]; then
+  echo "         Sorting by: ev_roi"
+  echo "         Min top1% finish rate: 0.0% (disabled for EV ROI mode)"
+else
+  echo "         Sorting by: top1_pct_finish_rate"
+  echo "         Min top1% finish rate: 0.25%"
+fi
 echo "         Max player overlap: 5"
 echo "================================================================"
 
+SORT_BY="top1_pct_finish_rate"
+MIN_TOP1_PCT="1.0"
+if [[ -n "${CONTEST_ID}" ]]; then
+  SORT_BY="ev_roi"
+  MIN_TOP1_PCT="0.0"
+fi
+
 python -m src.nfl.diversify_lineups \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 1.0 \
+  --min-top1-pct "${MIN_TOP1_PCT}" \
+  --sort-by "${SORT_BY}" \
   --max-overlap 5 \
   --max-flex-overlap 5 \
   --cpt-field-cap-multiplier 1.5 \

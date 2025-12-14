@@ -65,15 +65,45 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+# Optional flags (can appear anywhere after the required CSV + corr workbook):
+#   --contest-id <id>    Fetch DK contest payout structure and compute EV ROI
+#   --payouts-json <path> Use a pre-downloaded DK contest JSON instead of fetching
+CONTEST_ID=""
+PAYOUTS_JSON=""
+POSITIONAL=()
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --contest-id)
+      CONTEST_ID="${2:-}"
+      shift 2
+      ;;
+    --payouts-json)
+      PAYOUTS_JSON="${2:-}"
+      shift 2
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${POSITIONAL[@]}"
+
 if [[ "${#}" -lt 2 ]]; then
-  echo "Usage: $0 PATH_TO_SABERSIM_CSV PATH_TO_CORR_EXCEL [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM] [MAX_FLEX_OVERLAP] [CPT_FIELD_CAP_MULTIPLIER]" >&2
+  echo "Usage: $0 PATH_TO_SABERSIM_CSV PATH_TO_CORR_EXCEL [FIELD_SIZE] [NUM_LINEUPS] [SALARY_CAP] [STACK_MODE] [STACK_WEIGHTS] [DIVERSIFIED_NUM] [MAX_FLEX_OVERLAP] [CPT_FIELD_CAP_MULTIPLIER] [--contest-id ID] [--payouts-json PATH]" >&2
   exit 1
 fi
 
 SABERSIM_CSV="$1"
 CORR_EXCEL="$2"
-FIELD_SIZE="${3:-6535}"
-NUM_LINEUPS="${4:-5000}"
+FIELD_SIZE_ARG="${3-}"
+# If contest-id is provided, allow FIELD_SIZE to be omitted (infer via DK API).
+if [[ -n "${CONTEST_ID}" ]]; then
+  FIELD_SIZE="${FIELD_SIZE_ARG-}"
+else
+  FIELD_SIZE="${FIELD_SIZE_ARG:-9803}"
+fi
+NUM_LINEUPS="${4:-1000}"
 SALARY_CAP="${5:-50000}"
 STACK_MODE="${6:-multi}"
 STACK_WEIGHTS="${7-}"
@@ -96,7 +126,7 @@ else
 fi
 
 MAX_FLEX_OVERLAP="${9:-5}"
-CPT_FIELD_CAP_MULTIPLIER="${10:-1.9}"
+CPT_FIELD_CAP_MULTIPLIER="${10:-1.5}"
 CHUNK_SIZE_ENV="${CHUNK_SIZE:-100}"
 
 if [[ ! -f "${SABERSIM_CSV}" ]]; then
@@ -192,32 +222,61 @@ fi
 echo
 echo "================================================================"
 echo "Step 2/4: Estimating top 1% finish probabilities (explicit field)"
-echo "         Field size: ${FIELD_SIZE}"
+if [[ -n "${CONTEST_ID}" ]]; then
+  echo "         Contest id: ${CONTEST_ID} (field size inferred unless overridden)"
+else
+  echo "         Field size: ${FIELD_SIZE}"
+fi
 echo "         Correlation workbook: ${CORR_EXCEL}"
 echo "         Lineups workbook: ${LINEUPS_EXCEL}"
 echo "================================================================"
 
+TOP1_ARGS=()
+if [[ -n "${FIELD_SIZE}" ]]; then
+  TOP1_ARGS+=(--field-size "${FIELD_SIZE}")
+fi
+if [[ -n "${CONTEST_ID}" ]]; then
+  TOP1_ARGS+=(--contest-id "${CONTEST_ID}")
+fi
+if [[ -n "${PAYOUTS_JSON}" ]]; then
+  TOP1_ARGS+=(--payouts-json "${PAYOUTS_JSON}")
+fi
+
 python -m src.nba.top1pct_finish_rate_nba \
-  --field-size "${FIELD_SIZE}" \
   --lineups-excel "${LINEUPS_EXCEL}" \
   --corr-excel "${CORR_EXCEL}" \
   --num-sims 100000 \
   --field-model "explicit" \
-  --run-dir "${RUN_DIR}"
+  --run-dir "${RUN_DIR}" \
+  "${TOP1_ARGS[@]}"
 
 echo
 echo "================================================================"
 echo "Step 3/4: Selecting diversified lineups"
 echo "         Target diversified lineups: ${DIVERSIFIED_NUM}"
-echo "         Min top1% finish rate: 1.0%"
+if [[ -n "${CONTEST_ID}" ]]; then
+  echo "         Sorting by: ev_roi"
+  echo "         Min top1% finish rate: 0.0% (disabled for EV ROI mode)"
+else
+  echo "         Sorting by: top1_pct_finish_rate"
+  echo "         Min top1% finish rate: 1.0%"
+fi
 echo "         Max player overlap: 4"
 echo "         Max FLEX/UTIL overlap: ${MAX_FLEX_OVERLAP}"
 echo "         CPT field cap multiplier: ${CPT_FIELD_CAP_MULTIPLIER}"
 echo "================================================================"
 
+SORT_BY="top1_pct_finish_rate"
+MIN_TOP1_PCT="1.0"
+if [[ -n "${CONTEST_ID}" ]]; then
+  SORT_BY="ev_roi"
+  MIN_TOP1_PCT="0.0"
+fi
+
 python -m src.nba.diversify_lineups_nba \
   --num-lineups "${DIVERSIFIED_NUM}" \
-  --min-top1-pct 0.7 \
+  --min-top1-pct "${MIN_TOP1_PCT}" \
+  --sort-by "${SORT_BY}" \
   --max-overlap 5 \
   --max-flex-overlap "${MAX_FLEX_OVERLAP}" \
   --cpt-field-cap-multiplier "${CPT_FIELD_CAP_MULTIPLIER}" \

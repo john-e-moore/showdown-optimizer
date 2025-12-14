@@ -56,6 +56,44 @@ pipeline, but each module can also be run individually as documented below.
 
 ---
 
+## End-to-end scripts
+
+These scripts run the full optimizer → simulation → diversification → DKEntries fill loop.
+
+### NFL – `run_full.sh`
+
+- **Top1% (legacy)**
+
+```bash
+./run_full.sh data/nfl/sabersim/NFL_<slate>.csv 23529 150
+```
+
+- **EV ROI (contest payouts)**
+
+```bash
+./run_full.sh data/nfl/sabersim/NFL_<slate>.csv --contest-id <DK_CONTEST_ID>
+```
+
+### NBA – `run_full_nba.sh`
+
+- **Top1% (legacy)**
+
+```bash
+./run_full_nba.sh data/nba/sabersim/NBA_<slate>.csv outputs/nba/correlations/my_corr_matrix.xlsx 9803 1000
+```
+
+- **EV ROI (contest payouts)**
+
+```bash
+./run_full_nba.sh data/nba/sabersim/NBA_<slate>.csv outputs/nba/correlations/my_corr_matrix.xlsx --contest-id <DK_CONTEST_ID>
+```
+
+Notes:
+- When `--contest-id` is provided, the scripts will download DraftKings contest JSON (cached under `data/<sport>/payouts/`) and diversify by `ev_roi`.
+- You can optionally pass `--payouts-json <path>` to use a pre-downloaded contest JSON file instead of downloading.
+
+---
+
 ## Environment and Installation
 
 - **Python**: Use a recent Python 3 (3.10+ recommended).
@@ -172,6 +210,15 @@ ownership.
 python -m src.nfl.top1pct_finish_rate --field-size 23529
 ```
 
+- **EV ROI example (download DK payouts + infer field size):**
+
+```bash
+python -m src.nfl.top1pct_finish_rate \
+  --contest-id <DK_CONTEST_ID> \
+  --field-model explicit \
+  --num-sims 100000
+```
+
 - **Explicit input example:**
 
 ```bash
@@ -186,7 +233,12 @@ python -m src.nfl.top1pct_finish_rate \
 ```
 
 - **Flags:**
-  - **`--field-size`** (required): Total number of lineups in the contest field.
+  - **`--field-size`**: Total number of lineups in the contest field.
+    - Required unless `--contest-id` is provided (then inferred from DK contest metadata).
+  - **`--contest-id`**: DraftKings contest id. When provided, download contest payout
+    info and compute per-lineup `avg_payout` and `ev_roi`.
+  - **`--payouts-json`**: Optional path to a cached DraftKings contest JSON file.
+  - **`--sim-batch-size`**: Simulation batch size used for streaming scoring.
   - **`--lineups-excel`**: Path to lineups workbook under `outputs/nfl/lineups/`.
     - Default: most recent `.xlsx` in that directory.
   - **`--corr-excel`**: Path to correlations workbook under
@@ -207,6 +259,9 @@ python -m src.nfl.top1pct_finish_rate \
 
 - **Output:**
   - Writes a top1% workbook under `outputs/nfl/top1pct/` (exact path is printed).
+  - When run with `--contest-id`, the `Lineups_Top1Pct` sheet includes:
+    - `avg_payout`: average simulated payout (in dollars)
+    - `ev_roi`: \((\text{avg_payout} - \text{entry_fee}) / \text{entry_fee}\)
 
 ### NFL lineup diversification – `src.nfl.diversify_lineups`
 
@@ -226,6 +281,9 @@ python -m src.nfl.diversify_lineups \
   - **`--min-top1-pct`**: Minimum `top1_pct_finish_rate` (in percent)
     required to keep a lineup.
     - Default: `1.0`.
+  - **`--sort-by`**: Column to sort candidate lineups by before greedy selection.
+    - Default: `top1_pct_finish_rate`.
+    - Use `ev_roi` when top1% scoring was run with `--contest-id`.
   - **`--max-overlap`**: Maximum overlapping players allowed between any pair
     of selected lineups (\(0\)–\(6\) for Showdown).
     - Default: `4`.
@@ -466,7 +524,12 @@ python -m src.nba.top1pct_finish_rate_nba \
 ```
 
 - **Flags:**
-  - **`--field-size`** (required): Total number of lineups in the contest field.
+  - **`--field-size`**: Total number of lineups in the contest field.
+    - Required unless `--contest-id` is provided (then inferred from DK contest metadata).
+  - **`--contest-id`**: DraftKings contest id. When provided, download contest payout
+    info and compute per-lineup `avg_payout` and `ev_roi`.
+  - **`--payouts-json`**: Optional path to a cached DraftKings contest JSON file.
+  - **`--sim-batch-size`**: Simulation batch size used for streaming scoring.
   - **`--lineups-excel`**: Lineups workbook under `outputs/nba/lineups/`.
     - Default: most recent `.xlsx` there.
   - **`--corr-excel`**: Correlations workbook under `outputs/nba/correlations/`.
@@ -485,6 +548,9 @@ python -m src.nba.top1pct_finish_rate_nba \
 
 - **Output:**
   - Writes a top1% workbook under `outputs/nba/top1pct/`.
+  - When run with `--contest-id`, the `Lineups_Top1Pct` sheet includes:
+    - `avg_payout`: average simulated payout (in dollars)
+    - `ev_roi`: \((\text{avg_payout} - \text{entry_fee}) / \text{entry_fee}\)
 
 ### NBA field-style augmentation – `src.nba.augment_lineups_with_field`
 
@@ -534,6 +600,9 @@ python -m src.nba.diversify_lineups_nba \
   - **`--num-lineups`** (required): Number of lineups to select.
   - **`--min-top1-pct`**: Minimum `top1_pct_finish_rate` in percent.
     - Default: `1.0`.
+  - **`--sort-by`**: Column to sort candidate lineups by before greedy selection.
+    - Default: `top1_pct_finish_rate`.
+    - Use `ev_roi` when top1% scoring was run with `--contest-id`.
   - **`--max-overlap`**: Maximum overlapping players allowed (0–6).
     - Default: `4`.
   - **`--max-flex-overlap`**: Optional maximum overlapping FLEX/UTIL players allowed
