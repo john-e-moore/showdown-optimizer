@@ -28,6 +28,7 @@ MODELS_DIR: Final[Path] = config_base.MODELS_ROOT
 
 OUTPUTS_DIR: Final[Path] = config_base.get_outputs_dir_for_sport("nba")
 CORR_OUTPUTS_DIR: Final[Path] = OUTPUTS_DIR / "correlations"
+CORRELATIONS_DIR: Final[Path] = DATA_DIR / "correlations"
 DIAGNOSTICS_DIR: Final[Path] = config_base.get_diagnostics_dir_for_sport("nba")
 
 
@@ -84,6 +85,7 @@ def ensure_directories() -> None:
     """
 
     CORR_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    CORRELATIONS_DIR.mkdir(parents=True, exist_ok=True)
     DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
 

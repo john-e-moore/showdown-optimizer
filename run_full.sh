@@ -88,7 +88,7 @@ if [[ -n "${CONTEST_ID}" ]]; then
 else
   FIELD_SIZE="${FIELD_SIZE_ARG:-250}"
 fi
-NUM_LINEUPS="${3:-2000}"
+NUM_LINEUPS="${3:-2500}"
 SALARY_CAP="${4:-50000}"
 STACK_MODE="${5:-multi}"
 STACK_WEIGHTS="${6-}"
@@ -263,7 +263,7 @@ python -m src.nfl.diversify_lineups \
   --sort-by "${SORT_BY}" \
   --max-overlap 5 \
   --max-flex-overlap 5 \
-  --cpt-field-cap-multiplier 1.5 \
+  --cpt-field-cap-multiplier 1.9 \
   --lineups-excel "${LINEUPS_EXCEL}" \
   --output-dir "${RUN_DIR}"
 

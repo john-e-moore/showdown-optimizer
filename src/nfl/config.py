@@ -31,7 +31,13 @@ SABERSIM_DIR: Final[Path] = DATA_DIR / "sabersim"
 MODELS_DIR: Final[Path] = config_base.MODELS_ROOT
 OUTPUTS_DIR: Final[Path] = config_base.get_outputs_dir_for_sport("nfl")
 CORR_OUTPUTS_DIR: Final[Path] = OUTPUTS_DIR / "correlations"
+CORRELATIONS_DIR: Final[Path] = CORR_OUTPUTS_DIR
 DIAGNOSTICS_DIR: Final[Path] = config_base.get_diagnostics_dir_for_sport("nfl")
+
+# Flashback sim behavior:
+# When --corr-excel is omitted, compute correlations directly from the Sabersim
+# projections and write a correlation workbook under CORRELATIONS_DIR.
+FLASHBACK_COMPUTE_CORR_WHEN_MISSING: Final[bool] = True
 
 
 # -----------------------------------------------------------------------------

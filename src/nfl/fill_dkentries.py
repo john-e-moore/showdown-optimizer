@@ -100,8 +100,11 @@ def _load_diversified_lineups(
         )
 
     # Build LineupRecord list with a simple strength metric:
-    #   primary: top1_pct_finish_rate (higher is better)
+    #   primary:
+    #     - ev_roi when present (contest payout mode via --contest-id/--payouts-json)
+    #     - otherwise top1_pct_finish_rate (legacy)
     #   secondary: lineup_projection when available
+    has_ev_roi = "ev_roi" in df.columns
     has_top1 = "top1_pct_finish_rate" in df.columns
     has_proj = "lineup_projection" in df.columns
 
@@ -112,7 +115,17 @@ def _load_diversified_lineups(
         for j in range(1, 6):
             names.append(_parse_player_name(row[f"flex{j}"]))
 
-        base_strength = float(row["top1_pct_finish_rate"]) if has_top1 else 0.0
+        base_strength = 0.0
+        if has_ev_roi and pd.notna(row.get("ev_roi")):
+            try:
+                base_strength = float(row["ev_roi"])
+            except (TypeError, ValueError):
+                base_strength = 0.0
+        elif has_top1 and pd.notna(row.get("top1_pct_finish_rate")):
+            try:
+                base_strength = float(row["top1_pct_finish_rate"])
+            except (TypeError, ValueError):
+                base_strength = 0.0
         proj_component = (
             float(row["lineup_projection"])
             if has_proj and pd.notna(row["lineup_projection"])

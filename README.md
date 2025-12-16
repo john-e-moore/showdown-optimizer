@@ -90,6 +90,7 @@ These scripts run the full optimizer → simulation → diversification → DKEn
 
 Notes:
 - When `--contest-id` is provided, the scripts will download DraftKings contest JSON (cached under `data/<sport>/payouts/`) and diversify by `ev_roi`.
+- In EV ROI mode, DKEntries filling will also prefer higher `ev_roi` lineups when it needs to break ties during fee-aware assignment (legacy mode prefers `top1_pct_finish_rate`).
 - You can optionally pass `--payouts-json <path>` to use a pre-downloaded contest JSON file instead of downloading.
 
 ---
@@ -336,6 +337,7 @@ Run a flashback contest simulation for a completed NFL Showdown slate.
 python -m src.nfl.flashback_sim \
   --contest-csv data/nfl/contests/contest_<id>.csv \
   --sabersim-csv data/nfl/sabersim/NFL_<slate>.csv \
+  --corr-excel outputs/nfl/correlations/showdown_corr_matrix.xlsx \
   --payouts-csv data/nfl/payouts/payouts_<id>.json \
   --num-sims 100000
 ```
@@ -345,6 +347,9 @@ python -m src.nfl.flashback_sim \
     - Default: most recent `.csv` in that directory.
   - **`--sabersim-csv`**: Sabersim projections CSV under `data/nfl/sabersim/`.
     - Default: most recent `.csv` in that directory.
+  - **`--corr-excel`**: Correlations workbook (absolute path, or relative to `outputs/nfl/correlations/`).
+    - If omitted, correlations are computed from the Sabersim projections and a timestamped workbook is written under `outputs/nfl/correlations/`.
+    - Workbook must contain sheets `Sabersim_Projections` and `Correlation_Matrix`.
   - **`--payouts-csv`**: DraftKings payout JSON under `data/nfl/payouts/`.
     - Despite the name, this flag expects a JSON file (`payouts-*.json`).
     - Default: inferred from contest filename or downloaded if missing.

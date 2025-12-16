@@ -73,8 +73,9 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to correlations Excel workbook under data/nfl/correlations/. "
-            "If omitted, the most recent .xlsx file in that directory is used. "
+            "Path to correlations Excel workbook (absolute path, or relative to outputs/nfl/correlations/). "
+            "If omitted, correlations are computed from the Sabersim projections and a "
+            "timestamped workbook is written under outputs/nfl/correlations/. "
             "Workbook must contain 'Sabersim_Projections' and 'Correlation_Matrix' sheets."
         ),
     )

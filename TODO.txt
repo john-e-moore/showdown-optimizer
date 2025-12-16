@@ -2,6 +2,10 @@ x Generate more lineups - explore why just 2000 takes so long but generating fie
 x Debug explicit field generator not respecting salary constraint
 x Optimizer constraints for NBA
 - Figure out a way to prioritize less duplicated lineups
+- Figure out how to generate a better field
+- Do ROI sims for all of my contests and assign lineups that way while still diversifying across portfolio.
+
+
 - Data storage on S3
  - I should extend DK-contests to store contest results and payouts; Is there an API endpoint for finished contests?
  - Structure: date/{sport}/{slate}/{contest_id}/

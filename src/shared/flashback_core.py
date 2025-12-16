@@ -24,6 +24,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple, Callable, Any
 
@@ -93,6 +94,53 @@ def _resolve_latest_excel(directory: Path, explicit: str | None) -> Path:
     if not candidates:
         raise FileNotFoundError(f"No .xlsx files found in directory: {directory}")
     return candidates[-1]
+
+
+def _resolve_corr_excel_path(corr_dir: Path, corr_excel: str) -> Path:
+    """
+    Resolve an explicitly specified correlation workbook path.
+
+    Rules:
+      - If corr_excel points to an existing file as-is (absolute or relative to CWD),
+        use it.
+      - Otherwise, if corr_excel is a relative path, try resolving it under corr_dir.
+      - If neither exists, raise a FileNotFoundError showing both candidates.
+    """
+    candidate = Path(corr_excel)
+    if candidate.is_file():
+        return candidate
+
+    if not candidate.is_absolute():
+        under_dir = corr_dir / candidate
+        if under_dir.is_file():
+            return under_dir
+        raise FileNotFoundError(
+            "Specified correlation workbook does not exist. "
+            f"Tried: {candidate} and {under_dir}"
+        )
+
+    raise FileNotFoundError(
+        f"Specified correlation workbook does not exist: {candidate}"
+    )
+
+
+def _write_corr_workbook(path: Path, sabersim_df: pd.DataFrame, corr_df: pd.DataFrame) -> None:
+    """
+    Write a correlation workbook that matches the format expected by
+    `top1pct_core._load_corr_workbook`.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
+        sabersim_df.to_excel(
+            writer,
+            sheet_name=top1pct_core.CORR_PROJECTIONS_SHEET_NAME,
+            index=False,
+        )
+        corr_df.to_excel(
+            writer,
+            sheet_name=top1pct_core.CORR_MATRIX_SHEET_NAME,
+            index=True,
+        )
 
 
 def _clean_entrant_name(entry_name: str) -> str:
@@ -1091,11 +1139,23 @@ def run_flashback(
     # Resolve input paths.
     contest_dir = config_module.DATA_DIR / "contests"
     sabersim_dir = config_module.SABERSIM_DIR
-    corr_dir = config_module.DATA_DIR / "correlations"
+    # Correlations directory differs by sport / pipeline:
+    # - NFL correlation workbooks are typically generated under outputs/<sport>/correlations
+    # - NBA correlation workbooks may be stored under data/<sport>/correlations
+    #
+    # Prefer explicit config overrides when available.
+    corr_dir = getattr(config_module, "CORRELATIONS_DIR", None)
+    if corr_dir is None:
+        corr_dir = getattr(config_module, "CORR_OUTPUTS_DIR", None)
+    if corr_dir is None:
+        outputs_dir = getattr(config_module, "OUTPUTS_DIR", None)
+        if outputs_dir is not None:
+            corr_dir = outputs_dir / "correlations"
+    if corr_dir is None:
+        corr_dir = config_module.DATA_DIR / "correlations"
 
     contest_path = _resolve_latest_csv(contest_dir, contest_csv)
     sabersim_path = _resolve_latest_csv(sabersim_dir, sabersim_csv)
-    corr_path = _resolve_latest_excel(corr_dir, corr_excel)
 
     # Extract contest_id from the contest standings filename.
     contest_filename = contest_path.name
@@ -1105,6 +1165,25 @@ def run_flashback(
     else:
         # Fallback: use the stem if pattern does not match.
         contest_id = contest_path.stem
+
+    # Resolve / compute correlation workbook.
+    corr_dir = Path(corr_dir)
+    corr_path: Path
+    if corr_excel is not None:
+        corr_path = _resolve_corr_excel_path(corr_dir, corr_excel)
+    else:
+        if bool(getattr(config_module, "FLASHBACK_COMPUTE_CORR_WHEN_MISSING", False)):
+            # Mirror the full pipeline behavior: compute corr from Sabersim
+            # projections and write a correlation workbook.
+            sabersim_proj_df = load_sabersim_projections(sabersim_path)
+            corr_df_built = simulate_corr_matrix_from_projections(sabersim_proj_df)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            corr_path = corr_dir / f"flashback_corr_{contest_id}_{ts}.xlsx"
+            _write_corr_workbook(corr_path, sabersim_proj_df, corr_df_built)
+            print(f"Computed correlation workbook: {corr_path}")
+        else:
+            corr_path = _resolve_latest_excel(corr_dir, None)
 
     print(f"Using contest CSV: {contest_path}")
     print(f"Using Sabersim CSV: {sabersim_path}")
