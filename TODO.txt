@@ -5,6 +5,7 @@ x Optimizer constraints for NBA
 - Figure out how to generate a better field
 - Do ROI sims for all of my contests and assign lineups that way while still diversifying across portfolio.
 
+- I think I also need to store contest results in a queryable format so I can see who the actual winners are, how much they're winning, whether it lines up with Sabersim flashback ROI's over a period of time, analyze what the winners are doing, etc.
 
 - Data storage on S3
  - I should extend DK-contests to store contest results and payouts; Is there an API endpoint for finished contests?

@@ -16,13 +16,14 @@ the optimizer and correlation pipelines.
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Mapping, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .field_builder import build_quota_balanced_field
 from .dk_contest_api import load_contest_payouts_and_size
+from .dkentries_core import build_name_role_to_id_map, resolve_latest_dkentries_csv
 
 
 LINEUPS_SHEET_NAME = "Lineups"
@@ -61,6 +62,126 @@ def _parse_player_name(cell: str) -> str:
     if split_idx == -1:
         return cell.strip()
     return cell[:split_idx].strip()
+
+
+def _infer_flex_role_label_from_outputs_dir(outputs_dir: Path) -> str:
+    """
+    Infer the DKEntries roster-position label for non-CPT slots for a sport.
+
+    DraftKings uses:
+      - NFL Showdown: FLEX
+      - NBA Showdown: UTIL
+    """
+    sport_hint = outputs_dir.name.lower() if outputs_dir.name else ""
+    return "UTIL" if sport_hint == "nba" else "FLEX"
+
+
+def _build_dk_lineups_df_from_mapping(
+    lineups_top1pct_df: pd.DataFrame,
+    name_role_to_id: Mapping[tuple[str, str], str],
+    *,
+    flex_role_label: str,
+) -> pd.DataFrame | None:
+    """
+    Build the DK_Lineups sheet DataFrame from Lineups_Top1Pct by replacing
+    slot cells with "Name (dk_player_id)" strings.
+
+    Returns None when mapping is missing for any required (name, role) key, so
+    callers can skip writing the sheet rather than producing incorrect output.
+    """
+    if lineups_top1pct_df.empty:
+        return lineups_top1pct_df.copy()
+
+    non_cpt_cols = _resolve_non_cpt_slot_columns(lineups_top1pct_df)
+    slot_cols = ["cpt"] + non_cpt_cols
+    missing: list[tuple[str, str]] = []
+
+    flex_role_label_up = str(flex_role_label).strip().upper()
+    if not flex_role_label_up:
+        raise ValueError("flex_role_label must be non-empty.")
+
+    # Validate mapping coverage first; if anything is missing, skip the sheet.
+    for col in slot_cols:
+        role = "CPT" if col == "cpt" else flex_role_label_up
+        names = (
+            lineups_top1pct_df[col]
+            .apply(_parse_player_name)
+            .astype(str)
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        for name in names:
+            key = (str(name).strip(), role)
+            if key not in name_role_to_id:
+                missing.append(key)
+
+    if missing:
+        sample = ", ".join([f"({n!r},{r!r})" for n, r in missing[:10]])
+        print(
+            "Warning: skipping DK_Lineups sheet because DKEntries mapping is missing "
+            f"{len(missing)} (Name, Role)->ID keys. Sample: {sample}"
+        )
+        return None
+
+    result = lineups_top1pct_df.copy()
+    for col in slot_cols:
+        role = "CPT" if col == "cpt" else flex_role_label_up
+
+        def _fmt(cell: object) -> str:
+            name = _parse_player_name(str(cell))
+            player_id = name_role_to_id[(name, role)]
+            return f"{name} ({player_id})"
+
+        result[col] = result[col].map(_fmt)
+
+    return result
+
+
+def _try_build_dk_lineups_df(
+    lineups_top1pct_df: pd.DataFrame,
+    *,
+    outputs_dir: Path,
+    data_dir: Path | None,
+    dkentries_csv: str | None,
+) -> pd.DataFrame | None:
+    """
+    Best-effort builder for DK_Lineups sheet.
+
+    Uses the embedded Name/ID/Roster Position dictionary from a DKEntries CSV.
+    When the DKEntries CSV cannot be resolved/parsed/mapped, returns None and
+    prints a warning.
+    """
+    if dkentries_csv is None and data_dir is None:
+        print(
+            "Warning: skipping DK_Lineups sheet because data_dir was not provided "
+            "and --dkentries-csv was not set."
+        )
+        return None
+
+    flex_role_label = _infer_flex_role_label_from_outputs_dir(outputs_dir)
+
+    try:
+        if dkentries_csv is not None:
+            dkentries_path = resolve_latest_dkentries_csv(Path("."), dkentries_csv)
+        else:
+            dkentries_path = resolve_latest_dkentries_csv(Path(data_dir), None)  # type: ignore[arg-type]
+    except Exception as exc:
+        print(f"Warning: skipping DK_Lineups sheet; failed to resolve DKEntries CSV: {exc}")
+        return None
+
+    try:
+        dk_df = pd.read_csv(dkentries_path)
+        name_role_to_id = build_name_role_to_id_map(dk_df, flex_role_label=flex_role_label)
+    except Exception as exc:
+        print(f"Warning: skipping DK_Lineups sheet; failed to build DKEntries mapping: {exc}")
+        return None
+
+    return _build_dk_lineups_df_from_mapping(
+        lineups_top1pct_df,
+        name_role_to_id,
+        flex_role_label=flex_role_label,
+    )
 
 
 def _load_lineups_workbook(
@@ -698,6 +819,7 @@ def run_top1pct(
     contest_id: str | None = None,
     payouts_json: str | None = None,
     data_dir: Path | None = None,
+    dkentries_csv: str | None = None,
     sim_batch_size: int = 200,
 ) -> Path:
     """
@@ -733,6 +855,10 @@ def run_top1pct(
             provided, bypasses the download and reads this file directly.
         data_dir: Data directory for the sport (e.g. data/nfl or data/nba). This
             is required when contest_id is provided so we can cache contest JSON.
+        dkentries_csv: Optional explicit path to a DKEntries CSV template. When
+            provided (or when data_dir is available to resolve the latest), an
+            additional sheet 'DK_Lineups' will be written that formats slots as
+            '{name} ({dk_player_id})' for manual copy/paste into DKEntries.
         sim_batch_size: Batch size for simulation streaming. Smaller values use
             less memory but may be slower.
 
@@ -1117,6 +1243,14 @@ def run_top1pct(
         lineups_with_top1.to_excel(
             writer, sheet_name="Lineups_Top1Pct", index=False
         )
+        dk_lineups_df = _try_build_dk_lineups_df(
+            lineups_with_top1,
+            outputs_dir=outputs_dir,
+            data_dir=data_dir,
+            dkentries_csv=dkentries_csv,
+        )
+        if dk_lineups_df is not None:
+            dk_lineups_df.to_excel(writer, sheet_name="DK_Lineups", index=False)
         meta_df.to_excel(writer, sheet_name="Meta", index=False)
         if field_lineups_with_meta is not None:
             field_lineups_with_meta.to_excel(

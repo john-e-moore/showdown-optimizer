@@ -45,6 +45,7 @@ def run(
     run_dir: Path | None = None,
     contest_id: str | None = None,
     payouts_json: str | None = None,
+    dkentries_csv: str | None = None,
     sim_batch_size: int = 200,
 ) -> Path:
     """
@@ -68,6 +69,7 @@ def run(
         run_dir=run_dir,
         contest_id=contest_id,
         payouts_json=payouts_json,
+        dkentries_csv=dkentries_csv,
         sim_batch_size=sim_batch_size,
     )
 
@@ -123,6 +125,17 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help=(
             "Path to correlations Excel workbook under outputs/nfl/correlations/. "
             "If omitted, the most recent .xlsx file in that directory is used."
+        ),
+    )
+    parser.add_argument(
+        "--dkentries-csv",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a DKEntries CSV template. When provided (or when a "
+            "latest DKEntries*.csv can be found under data/nfl/dkentries/), the "
+            "output workbook will include a DK_Lineups sheet formatted as "
+            "'Name (dk_player_id)' for copy/paste into DKEntries."
         ),
     )
     parser.add_argument(
@@ -217,6 +230,7 @@ def main(argv: List[str] | None = None) -> None:
         run_dir=Path(args.run_dir) if args.run_dir is not None else None,
         contest_id=args.contest_id,
         payouts_json=args.payouts_json,
+        dkentries_csv=args.dkentries_csv,
         sim_batch_size=args.sim_batch_size,
     )
 
