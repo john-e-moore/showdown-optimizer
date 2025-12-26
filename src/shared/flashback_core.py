@@ -716,6 +716,20 @@ def _compute_sim_roi(
     return sim_roi
 
 
+def _compute_lineup_duplicates_excluding_self(
+    simulation_df: pd.DataFrame,
+    lineup_cols: Sequence[str],
+) -> pd.Series:
+    """
+    Compute "Duplicates" per lineup as the number of *other* entries in the contest
+    that used the exact same lineup (CPT + 5 flex-style slots).
+
+    This is defined as: (group_size - 1), clipped at a minimum of 0.
+    """
+    dup_counts = simulation_df.groupby(list(lineup_cols))["Entrant"].transform("size")
+    return (dup_counts - 1).clip(lower=0)
+
+
 def _build_sabersim_ownership_and_salary(
     sabersim_raw_df: pd.DataFrame,
     *,
@@ -857,6 +871,8 @@ def _build_entrant_summary(
         "Top 20%": "mean",
         "Avg Points": "mean",
     }
+    if "Duplicates" in simulation_df.columns:
+        agg_spec["Duplicates"] = "mean"
     if "Actual ROI" in simulation_df.columns:
         agg_spec["Actual ROI"] = "mean"
     if "Sim ROI" in simulation_df.columns:
@@ -869,6 +885,7 @@ def _build_entrant_summary(
             "Top 5%": "Avg. Top 5%",
             "Top 20%": "Avg. Top 20%",
             "Avg Points": "Avg Points",
+            "Duplicates": "Avg. Duplicates",
             "Sim ROI": "Avg. Sim ROI",
         },
         inplace=True,
@@ -965,6 +982,8 @@ def _build_entrant_summary(
 
     # Final column ordering: base columns, then all CPT usage columns, then flex usage.
     base_cols = ["Entrant", "Entries"]
+    if "Avg. Duplicates" in summary.columns:
+        base_cols.append("Avg. Duplicates")
     if "Actual ROI" in summary.columns:
         base_cols.append("Actual ROI")
     if "Avg. Sim ROI" in summary.columns:
@@ -1341,10 +1360,11 @@ def run_flashback(
     # Duplicates: how many times this exact lineup (CPT + 5 FLEX) was entered.
     lineup_cols = ["CPT", "Flex1", "Flex2", "Flex3", "Flex4", "Flex5"]
     if all(col in simulation_df.columns for col in lineup_cols):
-        dup_counts = simulation_df.groupby(lineup_cols)["Entrant"].transform("size")
         # Ensure Duplicates appears immediately after 'Actual Points' (or
         # 'Avg Points' if Actual Points is unavailable).
-        simulation_df["Duplicates"] = dup_counts
+        simulation_df["Duplicates"] = _compute_lineup_duplicates_excluding_self(
+            simulation_df, lineup_cols=lineup_cols
+        )
         cols = list(simulation_df.columns)
         anchor_col = "Actual Points" if "Actual Points" in cols else "Avg Points"
         if anchor_col in cols:
@@ -1520,6 +1540,8 @@ def run_flashback(
                     for col in ["Entries", "Avg Points"]
                     if col in entrant_summary_df.columns
                 ]
+                if "Avg. Duplicates" in entrant_summary_df.columns:
+                    entrant_num_cols.insert(entrant_num_cols.index("Entries") + 1, "Avg. Duplicates")
                 _apply_column_formats(
                     ws_entrant, entrant_summary_df, entrant_num_cols, num_fmt
                 )
